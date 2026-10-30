@@ -109,12 +109,12 @@ def update_grab(db, tag, **fields) -> None:
         s.commit()
 
 
-def torrent(tag, progress, save_path, hash=HASH, tags=None):
+def torrent(tag, progress, save_path, hash=HASH, tags=None, qstate=None):
     return {
         "hash": hash,
         "tags": tags if tags is not None else tag,
         "progress": progress,
-        "state": "uploading" if progress == 1 else "downloading",
+        "state": qstate or ("uploading" if progress == 1 else "downloading"),
         "save_path": str(save_path),
     }
 
@@ -456,12 +456,11 @@ async def test_add_failed_for_downloaded_episode_deletes_torrent(db, http, dirs)
 
 
 @respx.mock
-@pytest.mark.parametrize("name", ["../outside.mp4", "missing.mp4"])
-async def test_source_outside_downloads_or_missing_is_never_moved(db, http, dirs, name):
+async def test_source_outside_downloads_is_never_moved(db, http, dirs):
     downloads, tv = dirs
     tag = add_grab(db)
     outside = write(downloads.parent / "outside.mp4", b"x")
-    delete, _ = mock_qbit([torrent(tag, 1.0, downloads)], [{"name": name, "size": 1}])
+    delete, _ = mock_qbit([torrent(tag, 1.0, downloads)], [{"name": "../outside.mp4", "size": 1}])
 
     await process_downloads(make_deps(db, http, dirs))
 
@@ -470,6 +469,119 @@ async def test_source_outside_downloads_or_missing_is_never_moved(db, http, dirs
     assert delete.call_count == 0
     grab, ep = state(db, tag)
     assert grab.state == "failed" and ep.state == "wanted"
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "qstate", ["uploading", "stalledUP", "pausedUP", "stoppedUP", "queuedUP", "forcedUP"]
+)
+async def test_every_seeding_state_is_filed(db, http, dirs, qstate):
+    downloads, tv = dirs
+    tag = add_grab(db)
+    write(downloads / "kshow/ep.mp4", b"e")
+    mock_qbit(
+        [torrent(tag, 1.0, downloads / "kshow", qstate=qstate)], [{"name": "ep.mp4", "size": 1}]
+    )
+
+    await process_downloads(make_deps(db, http, dirs))
+
+    assert (tv / DEST).read_bytes() == b"e"
+    assert state(db, tag)[0].state == "done"
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "qstate",
+    ["moving", "checkingUP", "checkingDL", "checkingResumeData", "allocating", "metaDL"],
+)
+async def test_busy_torrent_at_full_progress_waits_without_stalling(db, http, dirs, qstate):
+    downloads, tv = dirs
+    tag = add_grab(db, progress=1.0, last_progress_at=utcnow() - timedelta(hours=7))
+    delete, apprise = mock_qbit(
+        [torrent(tag, 1.0, downloads / "kshow", qstate=qstate)], [{"name": "ep.mp4", "size": 1}]
+    )
+
+    await process_downloads(make_deps(db, http, dirs))
+
+    assert list(tv.iterdir()) == []
+    assert delete.call_count == 0 and apprise.call_count == 0
+    grab, ep = state(db, tag)
+    assert grab.state == "downloading" and ep.state == "downloading"
+    assert grab.missing_since is None
+    assert grab.last_progress_at > utcnow() - timedelta(minutes=1)
+
+
+@respx.mock
+async def test_missing_source_in_seeding_state_retries_later(db, http, dirs):
+    downloads, tv = dirs
+    tag = add_grab(db)
+    delete, apprise = mock_qbit(
+        [torrent(tag, 1.0, downloads / "kshow")], [{"name": "ep.mp4", "size": 1}]
+    )
+    deps = make_deps(db, http, dirs)
+
+    await process_downloads(deps)
+
+    grab, ep = state(db, tag)
+    assert grab.state == "downloading" and ep.state == "downloading"
+    first_seen = grab.missing_since
+    assert first_seen > utcnow() - timedelta(minutes=1)
+
+    await process_downloads(deps)
+    assert state(db, tag)[0].missing_since == first_seen
+    assert delete.call_count == 0 and apprise.call_count == 0
+
+    write(downloads / "kshow/ep.mp4", b"e")
+    await process_downloads(deps)
+    assert (tv / DEST).read_bytes() == b"e"
+    assert state(db, tag)[0].state == "done"
+
+
+@respx.mock
+@pytest.mark.parametrize("qstate", ["uploading", "missingFiles", "error"])
+async def test_missing_source_for_an_hour_fails_and_deletes(db, http, dirs, qstate):
+    downloads, tv = dirs
+    tag = add_grab(db)
+    update_grab(db, tag, missing_since=utcnow() - timedelta(hours=1, seconds=1))
+    delete, apprise = mock_qbit(
+        [torrent(tag, 1.0, downloads / "kshow", qstate=qstate)], [{"name": "ep.mp4", "size": 1}]
+    )
+
+    await process_downloads(make_deps(db, http, dirs))
+
+    assert delete.call_count == 1
+    sent = delete.calls.last.request.content.decode()
+    assert f"hashes={HASH}" in sent and "deleteFiles=true" in sent
+    body = json.loads(apprise.calls.last.request.content)
+    assert body == {"title": "Download failed", "body": f"Download failed: {FOLDER} S02E04"}
+    grab, ep = state(db, tag)
+    assert grab.state == "failed" and ep.state == "wanted"
+
+
+@respx.mock
+@pytest.mark.parametrize("qstate", ["missingFiles", "error"])
+async def test_broken_torrent_waits_first(db, http, dirs, qstate):
+    downloads, _ = dirs
+    tag = add_grab(db, progress=0.3)
+    delete, apprise = mock_qbit([torrent(tag, 0.3, downloads / "kshow", qstate=qstate)])
+
+    await process_downloads(make_deps(db, http, dirs))
+
+    assert delete.call_count == 0 and apprise.call_count == 0
+    grab, _ = state(db, tag)
+    assert grab.state == "downloading" and grab.missing_since is not None
+
+
+@respx.mock
+async def test_recovered_torrent_clears_missing_clock(db, http, dirs):
+    downloads, _ = dirs
+    tag = add_grab(db, progress=0.3)
+    update_grab(db, tag, missing_since=utcnow() - timedelta(minutes=30))
+    mock_qbit([torrent(tag, 0.3, downloads / "kshow")])
+
+    await process_downloads(make_deps(db, http, dirs))
+
+    assert state(db, tag)[0].missing_since is None
 
 
 @respx.mock

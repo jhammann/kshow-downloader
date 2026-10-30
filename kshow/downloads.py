@@ -15,6 +15,14 @@ from kshow.qbit import QbitError, QbitFile, QbitTorrent
 log = logging.getLogger(__name__)
 
 TORRENT_GONE_AFTER = timedelta(minutes=15)
+SOURCE_MISSING_AFTER = timedelta(hours=1)
+
+# Complete and seeding: the payload is at its final save path.
+SEEDING_STATES = {"uploading", "stalledUP", "pausedUP", "stoppedUP", "queuedUP", "forcedUP"}
+# qBittorrent is busy with the files (e.g. moving out of its temp path): wait, don't stall.
+BUSY_STATES = {"moving", "checkingUP", "checkingDL", "checkingResumeData", "allocating", "metaDL"}
+# The files are missing or unreadable: like a missing source, retry for a while.
+BROKEN_STATES = {"missingFiles", "error"}
 
 
 def map_path(qbit_path: str, path_map: str) -> Path:
@@ -41,6 +49,30 @@ def _fail(session: Session, grab: Grab, ep: Episode) -> None:
     session.commit()
 
 
+async def _source_missing(
+    session: Session,
+    deps: Deps,
+    grab: Grab,
+    ep: Episode,
+    torrent: QbitTorrent,
+    label: str,
+    why: str,
+) -> None:
+    """The torrent's file is not (yet) readable: retry for a while, then give up."""
+    now = utcnow()
+    if grab.missing_since is None:
+        log.warning("%s: %s; retrying", label, why)
+        grab.missing_since = now
+        session.commit()
+        return
+    if now - grab.missing_since < SOURCE_MISSING_AFTER:
+        return
+    log.error("%s: %s for over %s; removing torrent", label, why, SOURCE_MISSING_AFTER)
+    await deps.qbit.delete(torrent.hash, True)
+    _fail(session, grab, ep)
+    await deps.notifier.send("Download failed", f"Download failed: {label}")
+
+
 async def _finish(
     session: Session,
     deps: Deps,
@@ -60,9 +92,12 @@ async def _finish(
 
     downloads = deps.settings.downloads_dir.resolve()
     src = (map_path(torrent.save_path, get_setting(session, "path_map")) / video.name).resolve()
-    if not src.is_relative_to(downloads) or not src.is_file():
-        log.error("refusing to file %s: %s is not a file under %s", label, src, downloads)
+    if not src.is_relative_to(downloads):
+        log.error("refusing to file %s: %s is not under %s", label, src, downloads)
         _fail(session, grab, ep)
+        return
+    if not src.is_file():
+        await _source_missing(session, deps, grab, ep, torrent, label, f"{src} is not a file")
         return
 
     dest = target_path(
@@ -126,8 +161,21 @@ async def _process(
         return
     torrent = matches[0]
 
-    if torrent.progress >= 1.0:
+    if torrent.state in SEEDING_STATES:
         await _finish(session, deps, grab, ep, show, torrent, label)
+        return
+    if torrent.state in BROKEN_STATES:
+        await _source_missing(
+            session, deps, grab, ep, torrent, label, f"torrent is in state {torrent.state}"
+        )
+        return
+    if grab.missing_since is not None:
+        grab.missing_since = None
+        session.commit()
+    if torrent.state in BUSY_STATES:
+        # Time spent here doesn't count toward the stall timeout.
+        grab.last_progress_at = utcnow()
+        session.commit()
     elif torrent.progress > grab.progress:
         grab.progress = torrent.progress
         grab.last_progress_at = utcnow()
