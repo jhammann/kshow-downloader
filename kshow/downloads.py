@@ -1,5 +1,6 @@
 """Track grabbed torrents in qBittorrent and file finished episodes into the library."""
 
+import asyncio
 import logging
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
@@ -109,7 +110,8 @@ async def _finish(
         PurePosixPath(video.name).suffix.lower(),
     )
     try:
-        move_into_library(src, dest)
+        # Across bind mounts this is a multi-GB copy: keep it off the event loop.
+        await asyncio.to_thread(move_into_library, src, dest)
     except FileExistsError:
         # The library already has this episode; the next scan marks it downloaded.
         log.error("not filing %s: %s already exists; removing torrent", label, dest)

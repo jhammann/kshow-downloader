@@ -2,6 +2,7 @@ import errno
 import json
 import os
 import shutil
+import threading
 from datetime import timedelta
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from sqlalchemy import select
 
 from kshow.config import Settings
 from kshow.db import Episode, Grab, Show, init_db, set_setting, utcnow
+from kshow import downloads as downloads_module
 from kshow.downloads import map_path, process_downloads
 from kshow.notify import Notifier
 from kshow.pipeline import Deps
@@ -687,3 +689,23 @@ async def test_failed_cross_device_move_leaves_nothing_and_continues(
     assert grab.state == "failed" and ep.state == "wanted"
     assert state(db, second)[0].progress == 0.5
 
+
+@respx.mock
+async def test_move_runs_off_the_event_loop_thread(db, http, dirs, monkeypatch):
+    downloads, tv = dirs
+    tag = add_grab(db)
+    write(downloads / "kshow/ep.mp4", b"e")
+    mock_qbit([torrent(tag, 1.0, downloads / "kshow")], [{"name": "ep.mp4", "size": 1}])
+    threads = []
+    real_move = downloads_module.move_into_library
+
+    def recording_move(src, dest):
+        threads.append(threading.current_thread())
+        return real_move(src, dest)
+
+    monkeypatch.setattr(downloads_module, "move_into_library", recording_move)
+
+    await process_downloads(make_deps(db, http, dirs))
+
+    assert (tv / DEST).read_bytes() == b"e"
+    assert threads and threads[0] is not threading.main_thread()

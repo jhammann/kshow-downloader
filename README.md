@@ -63,11 +63,39 @@ container (this does not apply if you set `SESSION_SECRET` yourself; change it i
 Behind a reverse proxy: when `APP_URL` starts with `https`, the session cookie is `Secure`, so
 opening the app over plain `http` on the LAN will not keep a session. Use the https URL.
 
+## Leaving `OIDC_ISSUER` unset
+
+Without `OIDC_ISSUER` there is no login at all: anyone who can reach port 8080 can add and
+remove shows and change settings. Only do this when the port is reachable from a trusted LAN,
+never when it is published to the internet or exposed through a reverse proxy.
+
+## qBittorrent paths
+
+kshow tells qBittorrent to save into the "qBittorrent save path" setting (default
+`/downloads/kshow`), a path as **qBittorrent** sees it. kshow then reads the finished file from
+the same path inside its own container. So qBittorrent's `/downloads` and kshow's `/downloads`
+must be the same host folder. In the example both map `/nas/Downloads`:
+
+```yaml
+# qBittorrent           # kshow
+- /nas/Downloads:/downloads   - /nas/Downloads:/downloads
+```
+
+If qBittorrent mounts that folder somewhere else, for example `/nas/Downloads:/data`, set the
+save path to `/data/kshow` and the "Path map" setting to `/data=/downloads`. The path map is a
+single `qbit-prefix=kshow-prefix` rewrite applied to qBittorrent's paths before kshow reads
+them; leave it empty when both containers use the same paths.
+
 ## How downloads are filed
 
-- `/downloads` and `/tv` are separate mounts, so filing is a copy followed by removing the
-  source. The destination filesystem needs hard-link support (the copy is hard-linked into place
-  to avoid overwriting existing files).
+- With `/downloads` and `/tv` as separate mounts, filing is a copy followed by removing the
+  source (the copy runs in the background, but a multi-GB episode still takes a while). The
+  destination filesystem needs hard-link support (the copy is hard-linked into place to avoid
+  overwriting existing files).
+- To make filing an instant rename instead, mount the common parent once and point both
+  directories into it, for example `/nas:/nas` with `TV_DIR=/nas/Media/TV` and
+  `DOWNLOADS_DIR=/nas/Downloads`. qBittorrent's save path then has to be a path under
+  `/nas/Downloads` as qBittorrent sees it; use the path map if its mount differs (see above).
 - Seeding stops after filing: once an episode is in the library, its torrent is removed from
   qBittorrent.
 
