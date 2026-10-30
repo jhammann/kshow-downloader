@@ -104,11 +104,12 @@ def test_move_across_devices(tmp_path, monkeypatch):
 def test_failed_cross_device_copy_leaves_nothing(tmp_path, monkeypatch):
     _force_exdev(monkeypatch)
 
-    def broken_copy(s, d, *a, **kw):
-        Path(d).write_bytes(b"vi")
+    def broken_copy(fsrc, fdst, *a, **kw):
+        fdst.write(fsrc.read(2))
+        fdst.flush()
         raise OSError(errno.ENOSPC, "disk full")
 
-    monkeypatch.setattr(shutil, "copy2", broken_copy)
+    monkeypatch.setattr(shutil, "copyfileobj", broken_copy)
     src = tmp_path / "ep.mp4"
     src.write_bytes(b"video")
     dest = tmp_path / "tv" / "Show - S01E01.mp4"
@@ -126,3 +127,24 @@ def test_broken_symlink_counts_as_existing(tmp_path):
     with pytest.raises(FileExistsError):
         move_into_library(src, dest)
     assert dest.is_symlink() and src.exists()
+
+
+def test_cross_device_move_ignores_planted_temp_symlink(tmp_path, monkeypatch):
+    _force_exdev(monkeypatch)
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"precious")
+    src = tmp_path / "dl" / "ep.mp4"
+    src.parent.mkdir()
+    src.write_bytes(b"video")
+    season = tmp_path / "tv" / "Season 01"
+    season.mkdir(parents=True)
+    dest = season / "Show - S01E01.mp4"
+    planted = season / f".{dest.name}.partial"
+    planted.symlink_to(victim)
+
+    move_into_library(src, dest)
+
+    assert victim.read_bytes() == b"precious"
+    assert planted.is_symlink() and planted.resolve() == victim.resolve()
+    assert dest.read_bytes() == b"video" and not dest.is_symlink()
+    assert sorted(p.name for p in season.iterdir()) == sorted([dest.name, planted.name])

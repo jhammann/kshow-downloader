@@ -418,12 +418,13 @@ async def test_failed_cross_device_move_leaves_nothing_and_continues(
     def rename(*a, **kw):
         raise OSError(errno.EXDEV, "cross-device link")
 
-    def broken_copy(s, d, *a, **kw):
-        Path(d).write_bytes(b"vi")
+    def broken_copy(fsrc, fdst, *a, **kw):
+        fdst.write(fsrc.read(2))
+        fdst.flush()
         raise OSError(errno.ENOSPC, "disk full")
 
     monkeypatch.setattr(os, "rename", rename)
-    monkeypatch.setattr(shutil, "copy2", broken_copy)
+    monkeypatch.setattr(shutil, "copyfileobj", broken_copy)
     delete, apprise = mock_qbit(
         [
             torrent(first, 1.0, downloads / "kshow"),

@@ -2,6 +2,7 @@ import errno
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 
 from kshow.releases import normalize_title, parse_release_name
@@ -69,11 +70,15 @@ def move_into_library(src: Path, dest: Path) -> Path:
     except OSError as e:
         if e.errno != errno.EXDEV:
             raise
-    # Across filesystems: copy to a hidden temp name, then publish it with a hard link,
-    # which fails instead of overwriting if dest appeared in the meantime.
-    tmp = dest.parent / f".{dest.name}.partial"
+    # Across filesystems: copy into a freshly created (O_EXCL, unpredictable) temp file,
+    # then publish it with a hard link, which fails instead of overwriting if dest
+    # appeared in the meantime.
+    fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.", suffix=".partial")
+    tmp = Path(tmp_name)
     try:
-        shutil.copy2(src, tmp)
+        with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
+            shutil.copyfileobj(fsrc, fdst)
+        shutil.copystat(src, tmp)
         os.link(tmp, dest)
     finally:
         tmp.unlink(missing_ok=True)
