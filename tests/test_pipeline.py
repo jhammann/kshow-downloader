@@ -255,14 +255,65 @@ async def test_qbit_down_keeps_episode_wanted(db, http, tmp_path):
     mock_post(1)
     respx.post(f"{QBIT}/api/v2/auth/login").mock(side_effect=httpx.ConnectError("down"))
     add = respx.post(f"{QBIT}/api/v2/torrents/add").respond(200, text="Ok.")
+    apprise = respx.post(APPRISE).respond(200)
     show_id = add_show(db)
+    with db() as s:
+        s.add(Episode(show_id=show_id, number=4, tvdb_airdate=utcnow().date() - timedelta(days=5)))
+        s.commit()
 
-    await check_all_shows(make_deps(db, http, tmp_path))
+    await check_show(make_deps(db, http, tmp_path), show_id)  # must not raise
 
     assert add.call_count == 0
     assert episodes(db, show_id)[4].state == "wanted"
     with db() as s:
-        assert s.scalars(select(Grab)).all() == []
+        grab = s.scalars(select(Grab)).one()
+        assert grab.state == "add_failed"
+    # the overdue step after grabbing still ran
+    assert "The Wonder Coach E04 not found yet" in apprise.calls.last.request.content.decode()
+
+
+@respx.mock
+async def test_qbit_add_failure_then_retry_uses_new_tag(db, http, tmp_path):
+    mock_search("신인감독 김연경 2.E04.261101.720p-NEXT")
+    mock_post(1)
+    respx.post(f"{QBIT}/api/v2/auth/login").respond(
+        200, text="Ok.", headers={"Set-Cookie": "SID=abc; path=/"}
+    )
+    add = respx.post(f"{QBIT}/api/v2/torrents/add").mock(
+        side_effect=[httpx.ReadTimeout("slow"), httpx.Response(200, text="Ok.")]
+    )
+    show_id = add_show(db)
+    deps = make_deps(db, http, tmp_path)
+
+    await check_show(deps, show_id)
+    assert episodes(db, show_id)[4].state == "wanted"
+    await check_show(deps, show_id)
+
+    assert add.call_count == 2
+    with db() as s:
+        grabs = s.scalars(select(Grab).order_by(Grab.id)).all()
+        assert [g.state for g in grabs] == ["add_failed", "downloading"]
+        assert grabs[0].qbit_tag != grabs[1].qbit_tag
+        for call, grab in zip(add.calls, grabs):
+            assert f'\r\n\r\n{grab.qbit_tag}\r\n'.encode() in call.request.content
+    assert episodes(db, show_id)[4].state == "downloading"
+
+
+@respx.mock
+async def test_qbit_rejects_torrent_keeps_episode_wanted(db, http, tmp_path):
+    mock_search("신인감독 김연경 2.E04.261101.720p-NEXT")
+    mock_post(1)
+    respx.post(f"{QBIT}/api/v2/auth/login").respond(
+        200, text="Ok.", headers={"Set-Cookie": "SID=abc; path=/"}
+    )
+    respx.post(f"{QBIT}/api/v2/torrents/add").respond(200, text="Fails.")
+    show_id = add_show(db)
+
+    await check_show(make_deps(db, http, tmp_path), show_id)
+
+    assert episodes(db, show_id)[4].state == "wanted"
+    with db() as s:
+        assert s.scalars(select(Grab)).one().state == "add_failed"
 
 
 @respx.mock

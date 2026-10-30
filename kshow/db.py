@@ -50,6 +50,7 @@ class Episode(Base):
 
 class Grab(Base):
     __tablename__ = "grabs"
+    __table_args__ = {"sqlite_autoincrement": True}  # ids become qBittorrent tags; never reuse
 
     id: Mapped[int] = mapped_column(primary_key=True)
     episode_id: Mapped[int] = mapped_column(ForeignKey("episodes.id"))

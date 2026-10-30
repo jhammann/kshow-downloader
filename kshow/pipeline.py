@@ -161,12 +161,15 @@ async def _grab(
             )
             session.commit()
             continue
+        # Commit the grab (and its tag) before qBittorrent sees it, so a tag that may
+        # exist in qBittorrent always belongs to a persisted grab and is never reused.
         grab = Grab(
             episode_id=ep.id, post_url=c.post_url, release_name=c.release.raw, qbit_tag=""
         )
         session.add(grab)
         session.flush()
         grab.qbit_tag = f"kshow-{grab.id}"
+        session.commit()
         try:
             await deps.qbit.add_torrent(
                 data,
@@ -176,8 +179,9 @@ async def _grab(
                 tag=grab.qbit_tag,
             )
         except QbitError as e:
-            log.warning("qBittorrent unavailable, stopping grabs for %s: %s", show.folder_name, e)
-            session.rollback()
+            log.warning("qBittorrent add failed, stopping grabs for %s: %s", show.folder_name, e)
+            grab.state = "add_failed"
+            session.commit()
             return
         ep.state = "downloading"
         session.commit()

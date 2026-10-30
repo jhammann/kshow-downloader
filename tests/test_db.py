@@ -80,3 +80,24 @@ def test_timestamps_are_naive_utc():
         assert abs((utcnow() - grab.last_progress_at).total_seconds()) < 5
         assert abs((utcnow() - grab.created_at).total_seconds()) < 5
         assert abs((utcnow() - show.added_at).total_seconds()) < 5
+
+
+def test_grab_ids_are_never_reused():
+    Session = init_db("sqlite://")
+    with Session() as s:
+        show = make_show()
+        s.add(show)
+        s.flush()
+        ep = Episode(show_id=show.id, number=1)
+        s.add(ep)
+        s.flush()
+        first = Grab(episode_id=ep.id, post_url="u", release_name="r", qbit_tag="")
+        s.add(first)
+        s.commit()
+        first_id = first.id
+        s.delete(first)
+        s.commit()
+        second = Grab(episode_id=ep.id, post_url="u", release_name="r", qbit_tag="")
+        s.add(second)
+        s.commit()
+        assert second.id > first_id
