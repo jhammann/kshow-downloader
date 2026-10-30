@@ -111,8 +111,10 @@ async def _finish(
     try:
         move_into_library(src, dest)
     except FileExistsError:
-        log.error("not filing %s: %s already exists; torrent left in qBittorrent", label, dest)
+        # The library already has this episode; the next scan marks it downloaded.
+        log.error("not filing %s: %s already exists; removing torrent", label, dest)
         _fail(session, grab, ep)
+        await deps.qbit.delete(torrent.hash, True)
         return
     except OSError as e:
         log.error("moving %s to %s failed: %s; torrent left in qBittorrent", label, dest, e)

@@ -224,7 +224,10 @@ async def test_existing_destination_not_overwritten(db, http, dirs):
 
     assert (tv / DEST).read_bytes() == b"old"
     assert src.read_bytes() == b"new"
-    assert delete.call_count == 0
+    assert delete.call_count == 1
+    sent = delete.calls.last.request.content.decode()
+    assert f"hashes={HASH}" in sent and "deleteFiles=true" in sent
+    assert apprise.call_count == 0
     grab, ep = state(db, tag)
     assert grab.state == "failed"
     assert ep.state == "wanted"
@@ -683,3 +686,4 @@ async def test_failed_cross_device_move_leaves_nothing_and_continues(
     grab, ep = state(db, first)
     assert grab.state == "failed" and ep.state == "wanted"
     assert state(db, second)[0].progress == 0.5
+
