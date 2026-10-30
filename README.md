@@ -74,12 +74,9 @@ never when it is published to the internet or exposed through a reverse proxy.
 kshow tells qBittorrent to save into the "qBittorrent save path" setting (default
 `/downloads/kshow`), a path as **qBittorrent** sees it. kshow then reads the finished file from
 the same path inside its own container. So qBittorrent's `/downloads` and kshow's `/downloads`
-must be the same host folder. In the example both map `/nas/Downloads`:
-
-```yaml
-# qBittorrent           # kshow
-- /nas/Downloads:/downloads   - /nas/Downloads:/downloads
-```
+must be the same host folder. In the example both containers have the volume
+`/nas/Downloads:/downloads`, so qBittorrent writes to `/nas/Downloads/kshow` on the host and
+kshow reads it from `/downloads/kshow`.
 
 If qBittorrent mounts that folder somewhere else, for example `/nas/Downloads:/data`, set the
 save path to `/data/kshow` and the "Path map" setting to `/data=/downloads`. The path map is a
