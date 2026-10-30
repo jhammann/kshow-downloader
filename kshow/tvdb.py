@@ -18,6 +18,10 @@ class TvdbError(Exception):
     """Any TVDB failure: transport error, login failure or unexpected status."""
 
 
+def _eng(translations) -> str | None:
+    return translations.get("eng") if isinstance(translations, dict) else None
+
+
 @dataclass
 class TvdbMatch:
     id: int
@@ -81,17 +85,22 @@ class TvdbClient:
             return resp
         raise TvdbError(f"TVDB {path} returned HTTP 401")  # pragma: no cover
 
-    def _data(self, resp: httpx.Response):
+    def _data(self, resp: httpx.Response, expect: type = dict):
         try:
-            return resp.json()["data"]
+            data = resp.json()["data"]
         except (ValueError, KeyError, TypeError) as exc:
             raise TvdbError("TVDB returned an unexpected response body") from exc
+        if not isinstance(data, expect):
+            raise TvdbError(f"TVDB returned unexpected data type {type(data).__name__}")
+        return data
 
     async def search(self, query: str) -> list[TvdbMatch]:
         resp = await self._get("/search", {"query": query, "type": "series"})
-        results = self._data(resp) or []
+        results = self._data(resp, list)
         matches = []
         for item in results[:8]:
+            if not isinstance(item, dict):
+                continue
             try:
                 tvdb_id = int(item["tvdb_id"])
             except (KeyError, ValueError, TypeError):
@@ -100,7 +109,7 @@ class TvdbClient:
                 TvdbMatch(
                     id=tvdb_id,
                     name=item.get("name") or "",
-                    english_name=(item.get("translations") or {}).get("eng"),
+                    english_name=_eng(item.get("translations")),
                     year=item.get("year"),
                     network=item.get("network"),
                     image_url=item.get("image_url"),
@@ -122,8 +131,12 @@ class TvdbClient:
         if resp.status_code == 404:
             return None
         d = self._data(resp)
+        try:
+            series_id = int(d["id"])
+        except (KeyError, ValueError, TypeError) as exc:
+            raise TvdbError("TVDB series has no valid id") from exc
         return TvdbMatch(
-            id=int(d["id"]),
+            id=series_id,
             name=d.get("name") or "",
             english_name=None,
             year=d.get("year"),
@@ -135,20 +148,26 @@ class TvdbClient:
         resp = await self._get(f"/series/{series_id}/translations/eng")
         if resp.status_code == 404:
             return None
-        return (self._data(resp)).get("name") or None
+        name = self._data(resp).get("name")
+        return name if isinstance(name, str) and name else None
 
     async def season_episodes(self, series_id: int, season: int) -> list[TvdbEpisode]:
         resp = await self._get(
             f"/series/{series_id}/episodes/default", {"season": season, "page": 0}
         )
         if resp.status_code == 404:
-            return []
+            raise TvdbError(f"TVDB series {series_id} not found")
         episodes = []
-        for ep in (self._data(resp)).get("episodes") or []:
+        eps = self._data(resp).get("episodes") or []
+        if not isinstance(eps, list):
+            raise TvdbError("TVDB episodes is not a list")
+        for ep in eps:
+            if not isinstance(ep, dict):
+                continue
             if ep.get("seasonNumber") != season or ep.get("number") is None:
                 continue
             aired = None
-            if ep.get("aired"):
+            if isinstance(ep.get("aired"), str):
                 try:
                     aired = date.fromisoformat(ep["aired"])
                 except ValueError:
@@ -160,5 +179,5 @@ class TvdbClient:
         resp = await self._get(f"/series/{series_id}")
         if resp.status_code == 404:
             raise TvdbError(f"TVDB series {series_id} not found")
-        status = (self._data(resp)).get("status") or {}
-        return status.get("name") == "Ended"
+        status = self._data(resp).get("status")
+        return isinstance(status, dict) and status.get("name") == "Ended"

@@ -157,3 +157,64 @@ async def test_login_failure_raises(client):
     respx.post(f"{BASE}/login").mock(return_value=httpx.Response(401))
     with pytest.raises(TvdbError):
         await client.is_ended(1)
+
+
+@respx.mock
+@pytest.mark.parametrize("body", [{"data": None}, {"data": "x"}, {"data": []}, {}, [1]])
+async def test_malformed_dict_bodies_raise_tvdb_error(client, body):
+    respx.post(f"{BASE}/login").mock(return_value=login_ok())
+    for path in ("/series/1", "/series/1/translations/eng", "/series/1/episodes/default"):
+        respx.get(f"{BASE}{path}").mock(return_value=httpx.Response(200, json=body))
+    with pytest.raises(TvdbError):
+        await client.is_ended(1)
+    with pytest.raises(TvdbError):
+        await client.english_name(1)
+    with pytest.raises(TvdbError):
+        await client.season_episodes(1, 1)
+    with pytest.raises(TvdbError):
+        await client.lookup("1")
+
+
+@respx.mock
+@pytest.mark.parametrize("body", [{"data": None}, {"data": {}}, {"data": "x"}])
+async def test_malformed_search_raises(client, body):
+    respx.post(f"{BASE}/login").mock(return_value=login_ok())
+    respx.get(f"{BASE}/search").mock(return_value=httpx.Response(200, json=body))
+    with pytest.raises(TvdbError):
+        await client.search("x")
+
+
+@respx.mock
+async def test_malformed_items_skipped(client):
+    respx.post(f"{BASE}/login").mock(return_value=login_ok())
+    respx.get(f"{BASE}/search").mock(
+        return_value=httpx.Response(
+            200, json={"data": ["junk", {"tvdb_id": "5", "name": "A", "translations": "bad"}]}
+        )
+    )
+    respx.get(f"{BASE}/series/1/episodes/default").mock(
+        return_value=httpx.Response(
+            200, json={"data": {"episodes": ["junk", {"number": 1, "seasonNumber": 1, "aired": 5}]}}
+        )
+    )
+    res = await client.search("x")
+    assert [(m.id, m.english_name) for m in res] == [(5, None)]
+    eps = await client.season_episodes(1, 1)
+    assert [(e.number, e.aired) for e in eps] == [(1, None)]
+
+
+@respx.mock
+async def test_season_episodes_404_raises(client):
+    respx.post(f"{BASE}/login").mock(return_value=login_ok())
+    respx.get(f"{BASE}/series/9/episodes/default").mock(return_value=httpx.Response(404))
+    with pytest.raises(TvdbError):
+        await client.season_episodes(9, 1)
+
+
+@respx.mock
+async def test_season_with_no_episodes_is_empty(client):
+    respx.post(f"{BASE}/login").mock(return_value=login_ok())
+    respx.get(f"{BASE}/series/9/episodes/default").mock(
+        return_value=httpx.Response(200, json={"data": {"episodes": []}})
+    )
+    assert await client.season_episodes(9, 1) == []
