@@ -1,10 +1,14 @@
 import asyncio
+import html
 import logging
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
+from fastapi.responses import HTMLResponse
+from starlette.middleware.sessions import SessionMiddleware
 
+from kshow import auth
 from kshow.config import Settings, get_settings
 from kshow.db import init_db
 from kshow.notify import Notifier
@@ -22,6 +26,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logging.basicConfig(
             level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
         )
+
+    auth.validate_auth_settings(settings)
+    session_secret = auth.load_session_secret(settings)
+    if not settings.auth_enabled:
+        log.warning("OIDC_ISSUER is not set; authentication is DISABLED")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -61,8 +70,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="kshow-downloader", lifespan=lifespan)
 
+    app.state.settings = settings
+    app.state.oauth = auth.build_oauth(settings) if settings.auth_enabled else None
+    app.add_exception_handler(auth.LoginRequired, auth.login_required_handler)
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=session_secret,
+        session_cookie=auth.SESSION_COOKIE,
+        max_age=auth.SESSION_MAX_AGE,
+        same_site="lax",
+        https_only=settings.app_url.startswith("https"),
+    )
+    app.include_router(auth.router)
+
     @app.get("/healthz")
     async def healthz():
         return {"ok": True}
+
+    @app.get("/", response_class=HTMLResponse)
+    async def index(user: dict = Depends(auth.require_user)):
+        # Placeholder; replaced by the UI in Task 11.
+        return f"<!doctype html><title>kshow</title><p>Hello, {html.escape(str(user['name']))}</p>"
 
     return app
