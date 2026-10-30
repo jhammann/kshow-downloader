@@ -79,7 +79,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session_cookie=auth.SESSION_COOKIE,
         max_age=auth.SESSION_MAX_AGE,
         same_site="lax",
-        https_only=settings.app_url.startswith("https"),
+        https_only=settings.app_url.lower().startswith("https"),
     )
     app.include_router(auth.router)
 

@@ -1,7 +1,7 @@
-import html
 import logging
 import os
 import secrets
+import tempfile
 from pathlib import Path
 
 from authlib.integrations.starlette_client import OAuth
@@ -46,19 +46,36 @@ def validate_auth_settings(settings: Settings) -> None:
         )
 
 
+MIN_SECRET_LEN = 32
+
+
+def _check_secret(secret: str) -> str:
+    if len(secret) < MIN_SECRET_LEN:
+        raise RuntimeError(
+            f"Session secret is empty or shorter than {MIN_SECRET_LEN} characters"
+        )
+    return secret
+
+
 def load_session_secret(settings: Settings) -> str:
     if settings.session_secret:
-        return settings.session_secret
+        return _check_secret(settings.session_secret)
     path: Path = settings.config_dir / "session_secret"
     settings.config_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        return path.read_text().strip()
-    secret = secrets.token_urlsafe(32)
-    with os.fdopen(fd, "w") as f:
-        f.write(secret)
-    return secret
+    if not path.exists():
+        secret = secrets.token_urlsafe(32)
+        fd, tmp = tempfile.mkstemp(dir=settings.config_dir, prefix=".session_secret.")
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(secret)
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                pass
+        finally:
+            os.unlink(tmp)
+    return _check_secret(path.read_text().strip())
 
 
 def build_oauth(settings: Settings) -> OAuth:
@@ -75,12 +92,18 @@ def build_oauth(settings: Settings) -> OAuth:
 
 
 def is_allowed(claims: dict, users: list[str], groups: list[str]) -> bool:
+    """Allow-list check. OIDC_ALLOWED_GROUPS is the recommended control.
+
+    Users match by stable `sub`, or by email only when email_verified is True.
+    preferred_username is never used: users can rename themselves in the IdP.
+    """
     if not users and not groups:
         return True
-    if users and (
-        claims.get("preferred_username") in users or claims.get("email") in users
-    ):
-        return True
+    if users:
+        if claims.get("sub") in users:
+            return True
+        if claims.get("email_verified") is True and claims.get("email") in users:
+            return True
     user_groups = claims.get("groups") or []
     if isinstance(user_groups, str):
         user_groups = [user_groups]
@@ -123,11 +146,17 @@ async def auth_start(request: Request):
         return RedirectResponse("/", status_code=303)
     client = request.app.state.oauth.create_client(_PROVIDER)
     redirect_uri = request.app.state.settings.app_url.rstrip("/") + "/auth/callback"
-    return await client.authorize_redirect(request, redirect_uri)
+    try:
+        return await client.authorize_redirect(request, redirect_uri)
+    except Exception as exc:  # provider unreachable / bad metadata
+        log.warning("OIDC start failed: %s", type(exc).__name__)
+        return _bad_request(502)
 
 
-def _bad_request() -> HTMLResponse:
-    return _page("Login failed", "<p>Login failed. <a href=/login>Try again</a></p>", 400)
+def _bad_request(status: int = 400) -> HTMLResponse:
+    return _page(
+        "Login failed", "<p>Login failed. <a href=/login>Try again</a></p>", status
+    )
 
 
 @router.get("/auth/callback")
@@ -147,9 +176,15 @@ async def auth_callback(request: Request):
         return _bad_request()
     if settings.oidc_allowed_groups and "groups" not in claims:
         try:
-            claims.update(await client.userinfo(token=token))
+            info = await client.userinfo(token=token)
         except Exception as exc:
             log.warning("OIDC userinfo fetch failed: %s", type(exc).__name__)
+            info = {}
+        if info.get("sub") is not None and info["sub"] != claims["sub"]:
+            log.warning("OIDC userinfo sub mismatch")
+            return _bad_request()
+        if "groups" in info:
+            claims["groups"] = info["groups"]
     if not is_allowed(claims, settings.oidc_allowed_users, settings.oidc_allowed_groups):
         log.warning("OIDC login denied for %s", claims.get("preferred_username"))
         request.session.clear()

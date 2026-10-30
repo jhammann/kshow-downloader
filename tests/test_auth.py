@@ -8,6 +8,9 @@ from kshow.config import Settings
 from kshow.main import create_app
 
 
+HTTPS = "https://kshow.example.com"
+
+
 def _settings(tmp_path, **kw):
     return Settings(
         _env_file=None, config_dir=tmp_path / "cfg", disable_scheduler=True, **kw
@@ -29,13 +32,15 @@ def _oidc(tmp_path, **kw):
     "claims,users,groups,expected",
     [
         ({}, [], [], True),
-        ({"preferred_username": "a"}, ["a"], [], True),
-        ({"email": "a@x.nl"}, ["a@x.nl"], [], True),
-        ({"preferred_username": "b"}, ["a"], [], False),
+        ({"sub": "abc"}, ["abc"], [], True),
+        ({"sub": "x", "email": "a@x.nl", "email_verified": True}, ["a@x.nl"], [], True),
+        ({"sub": "x", "email": "a@x.nl", "email_verified": False}, ["a@x.nl"], [], False),
+        ({"sub": "x", "email": "a@x.nl"}, ["a@x.nl"], [], False),
+        ({"sub": "x", "preferred_username": "a"}, ["a"], [], False),
         ({"groups": ["g1", "g2"]}, [], ["g2"], True),
         ({"groups": ["g1"]}, [], ["g2"], False),
         ({}, [], ["g2"], False),
-        ({"preferred_username": "b", "groups": ["g2"]}, ["a"], ["g2"], True),
+        ({"sub": "b", "groups": ["g2"]}, ["a"], ["g2"], True),
     ],
 )
 def test_is_allowed(claims, users, groups, expected):
@@ -76,16 +81,14 @@ def _mock_token(monkeypatch, app, result):
 
 
 def test_callback_allowed_user_sets_session(tmp_path, monkeypatch):
-    app = create_app(_oidc(tmp_path, oidc_allowed_users=["jeroen"]))
+    app = create_app(_oidc(tmp_path, oidc_allowed_users=["1"]))
     _mock_token(
         monkeypatch,
         app,
         {"userinfo": {"sub": "1", "preferred_username": "jeroen", "email": "j@x.nl",
                       "secret_extra": "nope"}},
     )
-    with TestClient(
-        app, base_url="https://kshow.example.com", follow_redirects=False
-    ) as c:
+    with TestClient(app, base_url=HTTPS, follow_redirects=False) as c:
         r = c.get("/auth/callback")
         assert r.status_code == 303 and r.headers["location"] == "/"
         assert "kshow_session" in r.headers["set-cookie"]
@@ -99,11 +102,12 @@ def test_callback_allowed_user_sets_session(tmp_path, monkeypatch):
 
 
 def test_callback_disallowed_user_gets_403_and_no_session(tmp_path, monkeypatch):
-    app = create_app(_oidc(tmp_path, oidc_allowed_users=["jeroen"]))
-    _mock_token(monkeypatch, app, {"userinfo": {"sub": "2", "preferred_username": "eve"}})
-    with TestClient(app, follow_redirects=False) as c:
+    app = create_app(_oidc(tmp_path, oidc_allowed_users=["1"]))
+    _mock_token(monkeypatch, app, {"userinfo": {"sub": "2", "preferred_username": "1"}})
+    with TestClient(app, base_url=HTTPS, follow_redirects=False) as c:
         r = c.get("/auth/callback")
         assert r.status_code == 403 and "Not allowed" in r.text
+        assert "set-cookie" not in r.headers
         assert c.get("/").status_code == 303
 
 
@@ -112,9 +116,10 @@ def test_callback_errors_return_400(tmp_path, monkeypatch):
 
     app = create_app(_oidc(tmp_path))
     _mock_token(monkeypatch, app, MismatchingStateError())
-    with TestClient(app, follow_redirects=False) as c:
+    with TestClient(app, base_url=HTTPS, follow_redirects=False) as c:
         r = c.get("/auth/callback?state=bad&code=x")
         assert r.status_code == 400
+        assert "set-cookie" not in r.headers
         assert "Mismatching" not in r.text
         assert c.get("/").status_code == 303
 
@@ -122,8 +127,49 @@ def test_callback_errors_return_400(tmp_path, monkeypatch):
 def test_callback_without_claims_is_400(tmp_path, monkeypatch):
     app = create_app(_oidc(tmp_path))
     _mock_token(monkeypatch, app, {})
+    with TestClient(app, base_url=HTTPS, follow_redirects=False) as c:
+        r = c.get("/auth/callback")
+        assert r.status_code == 400 and "set-cookie" not in r.headers
+
+
+def test_userinfo_sub_mismatch_is_400(tmp_path, monkeypatch):
+    app = create_app(_oidc(tmp_path, oidc_allowed_groups=["admins"]))
+    _mock_token(monkeypatch, app, {"userinfo": {"sub": "1"}})
+    client = app.state.oauth.create_client("pocketid")
+
+    async def fake_userinfo(token=None):
+        return {"sub": "other", "groups": ["admins"]}
+
+    monkeypatch.setattr(client, "userinfo", fake_userinfo)
+    with TestClient(app, base_url=HTTPS, follow_redirects=False) as c:
+        r = c.get("/auth/callback")
+        assert r.status_code == 400 and "set-cookie" not in r.headers
+
+
+def test_userinfo_groups_merged(tmp_path, monkeypatch):
+    app = create_app(_oidc(tmp_path, oidc_allowed_groups=["admins"]))
+    _mock_token(monkeypatch, app, {"userinfo": {"sub": "1"}})
+    client = app.state.oauth.create_client("pocketid")
+
+    async def fake_userinfo(token=None):
+        return {"sub": "1", "groups": ["admins"]}
+
+    monkeypatch.setattr(client, "userinfo", fake_userinfo)
+    with TestClient(app, base_url=HTTPS, follow_redirects=False) as c:
+        assert c.get("/auth/callback").status_code == 303
+
+
+def test_auth_start_provider_unreachable(tmp_path, monkeypatch):
+    app = create_app(_oidc(tmp_path))
+    client = app.state.oauth.create_client("pocketid")
+
+    async def boom():
+        raise ConnectionError("secret detail")
+
+    monkeypatch.setattr(client, "load_server_metadata", boom)
     with TestClient(app, follow_redirects=False) as c:
-        assert c.get("/auth/callback").status_code == 400
+        r = c.get("/auth/start")
+        assert r.status_code == 502 and "secret detail" not in r.text
 
 
 def test_auth_start_redirects_to_provider(tmp_path, monkeypatch):
@@ -153,4 +199,14 @@ def test_session_secret_created_once_with_0600(tmp_path):
     path = tmp_path / "cfg" / "session_secret"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert load_session_secret(s) == first
-    assert load_session_secret(_settings(tmp_path, session_secret="env")) == "env"
+    assert load_session_secret(_settings(tmp_path, session_secret="e" * 40)) == "e" * 40
+
+
+def test_empty_or_short_secret_rejected(tmp_path):
+    s = _settings(tmp_path)
+    (tmp_path / "cfg").mkdir()
+    (tmp_path / "cfg" / "session_secret").write_text("")
+    with pytest.raises(RuntimeError):
+        load_session_secret(s)
+    with pytest.raises(RuntimeError):
+        load_session_secret(_settings(tmp_path, session_secret="short"))
