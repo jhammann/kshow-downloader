@@ -1,6 +1,6 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
-from sqlalchemy import ForeignKey, UniqueConstraint, create_engine, func, select
+from sqlalchemy import ForeignKey, UniqueConstraint, create_engine, select
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
@@ -9,6 +9,11 @@ from sqlalchemy.orm import (
     sessionmaker,
 )
 from sqlalchemy.pool import StaticPool
+
+
+def utcnow() -> datetime:
+    """Naive UTC now; the app-wide convention for all timestamps."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class Base(DeclarativeBase):
@@ -27,7 +32,7 @@ class Show(Base):
     season_folder: Mapped[str]
     status: Mapped[str] = mapped_column(default="following")  # following | finished | stopped
     season_first_aired: Mapped[date | None]
-    added_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    added_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
 class Episode(Base):
@@ -53,8 +58,8 @@ class Grab(Base):
     qbit_tag: Mapped[str]
     state: Mapped[str] = mapped_column(default="downloading")  # downloading | done | failed
     progress: Mapped[float] = mapped_column(default=0)
-    last_progress_at: Mapped[datetime] = mapped_column(server_default=func.now())
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    last_progress_at: Mapped[datetime] = mapped_column(default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
 class SourceRow(Base):

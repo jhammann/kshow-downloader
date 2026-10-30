@@ -2,7 +2,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from kshow.db import Episode, Show, SourceRow, get_setting, init_db, set_setting
+from kshow.db import Episode, Grab, Show, SourceRow, get_setting, init_db, set_setting, utcnow
 
 
 def make_show() -> Show:
@@ -63,3 +63,20 @@ def test_init_db_twice_does_not_duplicate(tmp_path):
     Session = init_db(url)
     with Session() as s:
         assert len(s.scalars(select(SourceRow)).all()) == 1
+
+
+def test_timestamps_are_naive_utc():
+    Session = init_db("sqlite://")
+    with Session() as s:
+        show = make_show()
+        s.add(show)
+        s.commit()
+        ep = Episode(show_id=show.id, number=1)
+        s.add(ep)
+        s.commit()
+        grab = Grab(episode_id=ep.id, post_url="u", release_name="r", qbit_tag="t")
+        s.add(grab)
+        s.commit()
+        assert abs((utcnow() - grab.last_progress_at).total_seconds()) < 5
+        assert abs((utcnow() - grab.created_at).total_seconds()) < 5
+        assert abs((utcnow() - show.added_at).total_seconds()) < 5
