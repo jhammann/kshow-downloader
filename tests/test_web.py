@@ -241,6 +241,7 @@ def test_confirm_sanitises_english_name(client):
     )
     r = client.get("/add/confirm", params={"tvdb_id": 9, "title": "누구", "season": 1})
     assert 'name="folder_name" value="WhoWhat Now"' in r.text
+    assert "not allowed in folder names" in r.text
 
 
 @respx.mock
@@ -320,15 +321,87 @@ def test_add_rejects_invalid(client, triggered, field, value):
     assert triggered == []
 
 
-def test_add_strips_unsafe_folder_chars(client):
-    r = client.post(
+def _post_add(client, folder, season="1"):
+    return client.post(
         "/add",
-        data={"search_title": "x", "tvdb_id": "", "folder_name": "Who/What: Now?",
-              "tvdb_season": "1", "release_season": "1"},
+        data={"search_title": "x", "tvdb_id": "", "folder_name": folder,
+              "tvdb_season": season, "release_season": season},
     )
+
+
+def test_add_with_unsafe_folder_chars_asks_to_confirm_sanitised_name(client, triggered):
+    r = _post_add(client, "Who/What: Now?")
+    assert r.status_code == 200
+    assert 'name="folder_name" value="WhoWhat Now"' in r.text
+    assert "not allowed in folder names" in r.text
+    with _session(client) as s:
+        assert s.scalar(select(Show)) is None
+    assert triggered == []
+
+    r = _post_add(client, "WhoWhat Now")
     assert r.status_code == 303
     with _session(client) as s:
         assert s.scalar(select(Show)).folder_name == "WhoWhat Now"
+
+
+def test_sanitised_name_matching_followed_show_still_asks_first(client):
+    _add_show(client, folder_name="WhoWhat Now", tvdb_season=1)
+    r = _post_add(client, "Who/What: Now?")
+    assert r.status_code == 200
+    assert "not allowed in folder names" in r.text
+
+
+@pytest.mark.parametrize("submitted", ["Physical: 100", " Physical: 100 "])
+def test_add_accepts_existing_folder_verbatim(client, settings, submitted):
+    (settings.tv_dir / "Physical: 100" / "Season 1").mkdir(parents=True)
+    r = _post_add(client, submitted)
+    assert r.status_code == 303
+    with _session(client) as s:
+        show = s.scalar(select(Show))
+    assert show.folder_name == "Physical: 100"
+    assert show.season_folder == "Season 1"
+
+
+def test_add_whitespace_only_change_is_not_a_confirmation(client):
+    assert _post_add(client, "  Hangout ").status_code == 303
+    with _session(client) as s:
+        assert s.scalar(select(Show)).folder_name == "Hangout"
+
+
+@pytest.mark.parametrize("name", [".hidden", "A\\B", "Tab\there"])
+def test_existing_but_unsafe_folder_is_not_accepted_verbatim(client, settings, name):
+    (settings.tv_dir / name).mkdir()
+    r = _post_add(client, name)
+    assert r.status_code in (200, 400)
+    with _session(client) as s:
+        assert s.scalar(select(Show)) is None
+
+
+def test_folder_match_must_be_exact(client, settings):
+    (settings.tv_dir / "Physical: 100").mkdir()
+    r = _post_add(client, "physical: 100")
+    assert r.status_code == 200
+    assert 'name="folder_name" value="physical 100"' in r.text
+
+
+def test_confirm_prefills_existing_folder_verbatim(client, settings):
+    (settings.tv_dir / "놀면: 뭐하니").mkdir()
+    r = client.get("/add/confirm", params={"title": "놀면: 뭐하니", "season": 1})
+    assert 'name="folder_name" value="놀면: 뭐하니"' in r.text
+    assert "not allowed in folder names" not in r.text
+
+
+def test_confirm_shows_target_path_and_existing_folder(client, settings):
+    (settings.tv_dir / "놀면 뭐하니" / "Season 3").mkdir(parents=True)
+    r = client.get("/add/confirm", params={"title": "놀면 뭐하니", "season": 3})
+    assert f"{settings.tv_dir}/놀면 뭐하니/Season 3" in r.text
+    assert "Existing folder — new episodes go here" in r.text
+
+
+def test_confirm_shows_target_path_for_new_folder(client, settings):
+    r = client.get("/add/confirm", params={"title": "놀면 뭐하니", "season": 3})
+    assert f"{settings.tv_dir}/놀면 뭐하니/Season 03" in r.text
+    assert "Existing folder" not in r.text
 
 
 def test_cross_origin_post_rejected(client, triggered):

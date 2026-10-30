@@ -61,14 +61,53 @@ templates.env.filters["localtime"] = localtime
 
 def sanitize_folder(raw: str) -> str | None:
     """A safe single path component for /tv, or None when nothing safe is left."""
-    name = "".join(
-        " " if unicodedata.category(ch).startswith("C") else ch for ch in raw
-    )
+    name = "".join(" " if _is_control(ch) else ch for ch in raw)
     name = _FOLDER_BAD.sub("", name)
     name = " ".join(name.split())
     if not name or name.startswith(".") or len(name) > MAX_FOLDER_LEN:
         return None
     return name
+
+
+def _is_control(ch: str) -> bool:
+    return unicodedata.category(ch).startswith("C")
+
+
+def existing_folder(tv_dir: Path, raw: str) -> str | None:
+    """raw (or raw without surrounding spaces) when it names an existing folder in tv_dir.
+
+    Hand-made library folders may contain characters sanitize_folder strips, such as ":".
+    """
+    if not tv_dir.is_dir():
+        return None
+    children = {c.name for c in tv_dir.iterdir() if c.is_dir()}
+    for name in (raw, raw.strip()):
+        if (
+            not name
+            or name.startswith(".")
+            or "/" in name
+            or "\\" in name
+            or any(_is_control(ch) for ch in name)
+        ):
+            continue
+        if name in children:
+            return name
+    return None
+
+
+_SANITISED_NOTE = (
+    "Some characters are not allowed in folder names, so the folder name was changed to "
+    "“{}”. Check it and submit again."
+)
+
+
+def choose_folder(tv_dir: Path, raw: str) -> tuple[str | None, bool]:
+    """The folder to use for raw, and whether sanitising changed it beyond trimming."""
+    folder = existing_folder(tv_dir, raw)
+    if folder is not None:
+        return folder, False
+    folder = sanitize_folder(raw)
+    return folder, folder is not None and folder != raw.strip()
 
 
 def _season(value: str) -> int | None:
@@ -232,18 +271,55 @@ async def add_confirm(request: Request, title: str, season: int = 1, tvdb_id: in
         except TvdbError as e:
             log.warning("TVDB english name failed for %s: %s", tvdb_id, e)
     tv_dir = request.app.state.settings.tv_dir
-    folder = None
+    folder, changed = None, False
     if english:
-        folder = suggest_folder(tv_dir, english) or sanitize_folder(english)
-    folder = folder or sanitize_folder(title) or ""
+        folder = suggest_folder(tv_dir, english)
+        if folder is None:
+            folder, changed = choose_folder(tv_dir, english)
+    if folder is None:
+        folder, changed = choose_folder(tv_dir, title)
     form = {
         "search_title": title,
         "tvdb_id": "" if tvdb_id is None else str(tvdb_id),
-        "folder_name": folder,
+        "folder_name": folder or "",
         "tvdb_season": str(season),
         "release_season": str(season),
     }
-    return _render(request, "confirm.html", form=form, english=english, errors=[])
+    notes = [_SANITISED_NOTE.format(folder)] if changed else []
+    return _render_confirm(request, form, english=english, notes=notes)
+
+
+def _render_confirm(
+    request: Request,
+    form: dict,
+    english: str | None = None,
+    errors: list[str] | None = None,
+    notes: list[str] | None = None,
+    status_code: int = 200,
+) -> HTMLResponse:
+    """The confirm page, with the library path the pre-filled values lead to."""
+    tv_dir = request.app.state.settings.tv_dir
+    folder = form["folder_name"]
+    season = _season(form["tvdb_season"])
+    target = existing = None
+    if folder and season is not None and folder == (
+        existing_folder(tv_dir, folder) or sanitize_folder(folder)
+    ):
+        show_dir = tv_dir / folder
+        season_folder = season_folder_name(show_dir, season)
+        target = f"{tv_dir}/{folder}/{season_folder}"
+        existing = show_dir.is_dir()
+    return _render(
+        request,
+        "confirm.html",
+        status_code=status_code,
+        form=form,
+        english=english,
+        errors=errors or [],
+        notes=notes or [],
+        target=target,
+        existing=existing,
+    )
 
 
 @router.post("/add")
@@ -263,7 +339,8 @@ async def add_show(request: Request):
             tvdb_id = int(form["tvdb_id"])
         except ValueError:
             errors.append("Invalid TVDB id.")
-    folder = sanitize_folder(form["folder_name"])
+    tv_dir = request.app.state.settings.tv_dir
+    folder, changed = choose_folder(tv_dir, form["folder_name"])
     if folder is None:
         errors.append("Folder name is empty or not allowed.")
     tvdb_season = _season(form["tvdb_season"])
@@ -272,6 +349,9 @@ async def add_show(request: Request):
     release_season = _season(form["release_season"])
     if release_season is None:
         errors.append("Release season must be a number from 1 to 99.")
+    if not errors and changed:
+        form["folder_name"] = folder
+        return _render_confirm(request, form, notes=[_SANITISED_NOTE.format(folder)])
     with _session(request) as session:
         if not errors:
             dup = session.scalar(
@@ -284,10 +364,7 @@ async def add_show(request: Request):
             if dup is not None:
                 return _redirect(f"/shows/{dup.id}")
         if errors:
-            return _render(
-                request, "confirm.html", status_code=400, form=form, english=None, errors=errors
-            )
-        tv_dir = request.app.state.settings.tv_dir
+            return _render_confirm(request, form, errors=errors, status_code=400)
         show = Show(
             search_title=title,
             release_season=release_season,
