@@ -1,4 +1,7 @@
+import errno
 import json
+import os
+import shutil
 from datetime import timedelta
 from pathlib import Path
 
@@ -401,3 +404,41 @@ async def test_qbit_error_on_files_changes_nothing(db, http, dirs):
     assert delete.call_count == 0
     grab, ep = state(db, tag)
     assert grab.state == "downloading" and ep.state == "downloading"
+
+
+@respx.mock
+async def test_failed_cross_device_move_leaves_nothing_and_continues(
+    db, http, dirs, monkeypatch
+):
+    downloads, tv = dirs
+    first = add_grab(db)
+    second = add_grab(db, progress=0.1, number=5)
+    src = write(downloads / "kshow/ep.mp4", b"video")
+
+    def rename(*a, **kw):
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    def broken_copy(s, d, *a, **kw):
+        Path(d).write_bytes(b"vi")
+        raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr(os, "rename", rename)
+    monkeypatch.setattr(shutil, "copy2", broken_copy)
+    delete, apprise = mock_qbit(
+        [
+            torrent(first, 1.0, downloads / "kshow"),
+            torrent(second, 0.5, downloads / "kshow", hash=HASH2),
+        ],
+        [{"name": "ep.mp4", "size": 5}],
+    )
+
+    await process_downloads(make_deps(db, http, dirs))
+
+    assert [p for p in tv.rglob("*") if p.is_file()] == []
+    assert src.read_bytes() == b"video"
+    assert delete.call_count == 0
+    body = json.loads(apprise.calls.last.request.content)
+    assert body == {"title": "Download failed", "body": f"Download failed: {FOLDER} S02E04"}
+    grab, ep = state(db, first)
+    assert grab.state == "failed" and ep.state == "wanted"
+    assert state(db, second)[0].progress == 0.5

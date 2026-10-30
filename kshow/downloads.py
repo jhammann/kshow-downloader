@@ -77,6 +77,11 @@ async def _finish(
         log.error("not filing %s: %s already exists; torrent left in qBittorrent", label, dest)
         _fail(session, grab, ep)
         return
+    except OSError as e:
+        log.error("moving %s to %s failed: %s; torrent left in qBittorrent", label, dest, e)
+        _fail(session, grab, ep)
+        await deps.notifier.send("Download failed", f"Download failed: {label}")
+        return
 
     # The file is in the library now: record that before anything else can fail.
     grab.state = "done"

@@ -1,3 +1,8 @@
+import errno
+import os
+import shutil
+from pathlib import Path
+
 import pytest
 
 from kshow.library import (
@@ -75,3 +80,49 @@ def test_move_never_overwrites(tmp_path):
     with pytest.raises(FileExistsError):
         move_into_library(src, dest)
     assert dest.read_text() == "old"
+
+
+def _force_exdev(monkeypatch):
+    def rename(src, dst, *a, **kw):
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    monkeypatch.setattr(os, "rename", rename)
+
+
+def test_move_across_devices(tmp_path, monkeypatch):
+    _force_exdev(monkeypatch)
+    src = tmp_path / "dl" / "ep.mp4"
+    src.parent.mkdir()
+    src.write_bytes(b"video")
+    dest = tmp_path / "tv" / "Show" / "Season 01" / "Show - S01E01.mp4"
+    assert move_into_library(src, dest) == dest
+    assert dest.read_bytes() == b"video"
+    assert not src.exists()
+    assert [p.name for p in dest.parent.iterdir()] == [dest.name]
+
+
+def test_failed_cross_device_copy_leaves_nothing(tmp_path, monkeypatch):
+    _force_exdev(monkeypatch)
+
+    def broken_copy(s, d, *a, **kw):
+        Path(d).write_bytes(b"vi")
+        raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr(shutil, "copy2", broken_copy)
+    src = tmp_path / "ep.mp4"
+    src.write_bytes(b"video")
+    dest = tmp_path / "tv" / "Show - S01E01.mp4"
+    with pytest.raises(OSError):
+        move_into_library(src, dest)
+    assert list((tmp_path / "tv").iterdir()) == []
+    assert src.read_bytes() == b"video"
+
+
+def test_broken_symlink_counts_as_existing(tmp_path):
+    src = tmp_path / "ep.mp4"
+    src.write_bytes(b"v")
+    dest = tmp_path / "dest.mp4"
+    dest.symlink_to(tmp_path / "nowhere")
+    with pytest.raises(FileExistsError):
+        move_into_library(src, dest)
+    assert dest.is_symlink() and src.exists()

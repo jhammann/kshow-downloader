@@ -1,3 +1,5 @@
+import errno
+import os
 import re
 import shutil
 from pathlib import Path
@@ -57,8 +59,23 @@ def target_path(
 
 
 def move_into_library(src: Path, dest: Path) -> Path:
-    if dest.exists():
+    """Move src to dest. Never overwrites, and never leaves a partial file at dest."""
+    if os.path.lexists(dest):
         raise FileExistsError(str(dest))
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(src), str(dest))
+    try:
+        os.rename(src, dest)  # atomic on the same filesystem
+        return dest
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+    # Across filesystems: copy to a hidden temp name, then publish it with a hard link,
+    # which fails instead of overwriting if dest appeared in the meantime.
+    tmp = dest.parent / f".{dest.name}.partial"
+    try:
+        shutil.copy2(src, tmp)
+        os.link(tmp, dest)
+    finally:
+        tmp.unlink(missing_ok=True)
+    src.unlink()
     return dest
