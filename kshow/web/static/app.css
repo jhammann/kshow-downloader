@@ -1,0 +1,107 @@
+:root {
+  --bg: #f6f6f4;
+  --surface: #ffffff;
+  --text: #1d1d1f;
+  --muted: #6b6b70;
+  --border: #e2e2de;
+  --accent: #2f6f5e;
+  --accent-text: #ffffff;
+  --warn-bg: #fff4e5;
+  --warn-text: #7a4b00;
+  --radius: 12px;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #151517;
+    --surface: #1f1f22;
+    --text: #ececef;
+    --muted: #9c9ca3;
+    --border: #333338;
+    --accent: #5fb39b;
+    --accent-text: #0d1f1a;
+    --warn-bg: #3a2a10;
+    --warn-text: #f3cf8f;
+  }
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 17px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  overflow-wrap: anywhere;
+}
+main, .top, footer { max-width: 640px; margin: 0 auto; padding: 0 16px; }
+main { padding-bottom: 32px; }
+.top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.top a { display: inline-flex; align-items: center; min-height: 44px; padding: 0 8px; color: var(--text); text-decoration: none; }
+.top .brand { font-weight: 700; padding-left: 0; }
+.top nav { display: flex; gap: 4px; }
+h1 { font-size: 1.5rem; margin: 8px 0 16px; }
+h2 { font-size: 1.15rem; margin: 28px 0 12px; }
+a { color: var(--accent); }
+.muted { color: var(--muted); font-size: 0.92rem; }
+.empty { color: var(--muted); text-align: center; padding: 24px 0; }
+.break { word-break: break-all; }
+
+.card {
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin: 0 0 12px;
+  color: inherit;
+  text-decoration: none;
+}
+a.card:active { border-color: var(--accent); }
+.card-title { font-weight: 600; font-size: 1.05rem; }
+.status { font-size: 0.95rem; }
+.show-card.status-stopped, .show-card.status-finished { opacity: 0.75; }
+
+.banner {
+  background: var(--warn-bg); color: var(--warn-text);
+  border-radius: var(--radius); padding: 12px 16px; margin: 0 0 12px;
+}
+.banner a { color: inherit; }
+
+label { font-size: 0.92rem; color: var(--muted); margin-top: 6px; }
+input[type=text], input[type=url], input[type=number], select {
+  width: 100%; min-height: 44px; padding: 8px 12px;
+  font: inherit; color: var(--text); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+input:focus, select:focus, button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: end; }
+.row > div { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.check { display: flex; align-items: center; gap: 8px; min-height: 44px; color: var(--text); margin: 0; }
+.check input { width: 22px; height: 22px; }
+
+button, .button {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 44px; padding: 8px 18px; margin-top: 8px;
+  font: inherit; font-weight: 600; text-decoration: none;
+  color: var(--text); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 10px; cursor: pointer;
+}
+.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.block { display: flex; width: 100%; }
+button.link { background: none; border: none; color: var(--muted); font-weight: 400; padding: 0; }
+.card form button, .card > button { width: 100%; }
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.actions button { width: 100%; }
+
+.match { flex-direction: row; align-items: center; gap: 14px; }
+.poster { flex: none; width: 64px; height: 94px; border-radius: 6px; object-fit: cover; background: var(--border); }
+.match-text, .names { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+
+.episode-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.badge { font-size: 0.85rem; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--border); white-space: nowrap; }
+.state-downloaded { color: var(--accent); border-color: var(--accent); }
+.state-failed { color: var(--warn-text); background: var(--warn-bg); border-color: transparent; }
+
+.htmx-indicator { display: none; }
+.htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: block; }
+footer { text-align: center; padding-bottom: 24px; }

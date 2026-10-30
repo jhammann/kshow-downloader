@@ -1,0 +1,27 @@
+{% if error %}<p class="banner" role="alert">{{ error }}</p>{% endif %}
+{% if title %}
+  {% if tvdb_enabled %}
+    {% for card in cards %}
+    <a class="card match" href="/add/confirm?{{ {'tvdb_id': card.m.id, 'title': title, 'season': season} | urlencode }}">
+      {% if card.image %}<img class="poster" src="{{ card.image }}" alt="" loading="lazy" referrerpolicy="no-referrer">{% else %}<span class="poster"></span>{% endif %}
+      <span class="match-text">
+        <span class="names">
+          <span class="card-title">{{ card.m.english_name or card.m.name }}</span>
+          {% if card.m.english_name %}<span lang="ko">{{ card.m.name }}</span>{% endif %}
+        </span>
+        <span class="muted">{{ [card.m.year, card.m.network] | select | join(" · ") }}</span>
+      </span>
+    </a>
+    {% else %}
+      {% if not error %}<p class="empty">No matches on TVDB.</p>{% endif %}
+    {% endfor %}
+    <form class="card" hx-post="/add/search" hx-target="#results">
+      <input type="hidden" name="query" value="{{ query }}">
+      <label for="ref">Not listed? English name or TVDB link</label>
+      <input id="ref" name="ref" type="text" value="{{ ref }}" autocomplete="off"
+             placeholder="https://thetvdb.com/series/…">
+      <button type="submit">Search again</button>
+    </form>
+  {% endif %}
+  <a class="button block" href="/add/confirm?{{ {'title': title, 'season': season} | urlencode }}">Add without TVDB</a>
+{% endif %}

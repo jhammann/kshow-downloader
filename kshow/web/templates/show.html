@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}{{ show.folder_name }}{% endblock %}
+{% block content %}
+<h1>{{ show.folder_name }}</h1>
+<p class="muted">{{ show.search_title }} · Season {{ show.tvdb_season }}{% if show.release_season != show.tvdb_season %} (release season {{ show.release_season }}){% endif %}{% if show.tvdb_id %} · TVDB {{ show.tvdb_id }}{% endif %}</p>
+<p class="status">{{ status }}</p>
+{% if show.status == "following" %}
+<div class="actions">
+  <form method="post" action="/shows/{{ show.id }}/search"><button class="primary" type="submit">Search now</button></form>
+  <form method="post" action="/shows/{{ show.id }}/stop" onsubmit="return confirm('Stop following? Files stay in the library.')"><button type="submit">Stop following</button></form>
+</div>
+{% endif %}
+<h2>Episodes</h2>
+{% for row in rows %}
+<div class="card episode">
+  <div class="episode-head">
+    <span class="card-title">E{{ '%02d' % row.ep.number }}</span>
+    <span class="badge state-{{ row.ep.state }}">{{ row.ep.state }}{% if row.ep.state == "downloading" and row.grab and row.grab.state == "downloading" %} {{ (row.grab.progress * 100) | int }}%{% endif %}</span>
+  </div>
+  {% if row.ep.tvdb_airdate %}<span class="muted">Aired {{ row.ep.tvdb_airdate.strftime("%d %b %Y") }}</span>{% endif %}
+  {% if row.grab %}<span class="muted break">{{ row.grab.release_name }}{% if row.grab.state in ("failed", "add_failed") %} — failed{% endif %}</span>{% endif %}
+  {% if row.ep.state in ("wanted", "failed") and show.status == "following" %}
+  <form method="post" action="/shows/{{ show.id }}/episodes/{{ row.ep.number }}/retry"><button type="submit">Retry</button></form>
+  {% endif %}
+</div>
+{% else %}
+<p class="empty">No episodes yet. The first check runs in the background.</p>
+{% endfor %}
+<p class="muted">Added {{ show.added_at | localtime }}</p>
+{% endblock %}

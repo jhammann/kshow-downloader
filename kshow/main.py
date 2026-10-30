@@ -1,11 +1,10 @@
 import asyncio
-import html
 import logging
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import Depends, FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from kshow import auth
@@ -16,6 +15,7 @@ from kshow.pipeline import Deps
 from kshow.qbit import QbitClient
 from kshow.scheduler import start_scheduler
 from kshow.tvdb import TvdbClient
+from kshow.web import routes as web_routes
 
 log = logging.getLogger(__name__)
 
@@ -87,9 +87,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def healthz():
         return {"ok": True}
 
-    @app.get("/", response_class=HTMLResponse)
-    async def index(user: dict = Depends(auth.require_user)):
-        # Placeholder; replaced by the UI in Task 11.
-        return f"<!doctype html><title>kshow</title><p>Hello, {html.escape(str(user['name']))}</p>"
+    app.mount("/static", StaticFiles(directory=web_routes.STATIC_DIR), name="static")
+    app.include_router(web_routes.router)
 
     return app

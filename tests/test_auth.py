@@ -51,7 +51,7 @@ def test_auth_disabled_allows_root(tmp_path):
     with TestClient(create_app(_settings(tmp_path))) as c:
         r = c.get("/")
         assert r.status_code == 200
-        assert "local" in r.text
+        assert "<h1>Shows</h1>" in r.text
 
 
 def test_root_redirects_to_login_when_enabled(tmp_path):

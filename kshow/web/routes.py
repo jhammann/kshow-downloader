@@ -1,0 +1,518 @@
+"""Phone-first web UI: show list, add flow, show detail and settings."""
+
+import logging
+import math
+import os
+import re
+import unicodedata
+from datetime import date, datetime, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
+
+from kshow.auth import require_same_origin, require_user
+from kshow.db import Episode, Grab, Show, SourceRow, get_setting, set_setting, utcnow
+from kshow.library import season_folder_name, suggest_folder
+from kshow.releases import parse_user_input
+from kshow.scheduler import reschedule_check, trigger_check
+from kshow.tvdb import TvdbError, TvdbMatch
+
+log = logging.getLogger(__name__)
+
+HERE = Path(__file__).parent
+STATIC_DIR = HERE / "static"
+templates = Jinja2Templates(directory=HERE / "templates")
+
+router = APIRouter(dependencies=[Depends(require_user), Depends(require_same_origin)])
+
+_STATUS_ORDER = {"following": 0, "finished": 1, "stopped": 2}
+_FOLDER_BAD = re.compile(r'[/\\:*?"<>|]')
+MAX_FOLDER_LEN = 120
+MAX_TITLE_LEN = 200
+RESOLUTIONS = ("480p", "720p", "1080p", "2160p")
+_CATEGORY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_SOURCE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+
+
+# --- helpers ----------------------------------------------------------------------
+
+
+def _local_tz():
+    try:
+        return ZoneInfo(os.environ.get("TZ") or "UTC")
+    except (ZoneInfoNotFoundError, ValueError):
+        return timezone.utc
+
+
+def localtime(dt: datetime | None) -> str:
+    """Format a naive-UTC timestamp in the TZ env timezone."""
+    if dt is None:
+        return ""
+    return dt.replace(tzinfo=timezone.utc).astimezone(_local_tz()).strftime("%d %b %H:%M")
+
+
+templates.env.filters["localtime"] = localtime
+
+
+def sanitize_folder(raw: str) -> str | None:
+    """A safe single path component for /tv, or None when nothing safe is left."""
+    name = "".join(
+        " " if unicodedata.category(ch).startswith("C") else ch for ch in raw
+    )
+    name = _FOLDER_BAD.sub("", name)
+    name = " ".join(name.split())
+    if not name or name.startswith(".") or len(name) > MAX_FOLDER_LEN:
+        return None
+    return name
+
+
+def _season(value: str) -> int | None:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if 1 <= n <= 99 else None
+
+
+def status_line(
+    show: Show, episodes: list[Episode], grabs: list[Grab], today: date | None = None
+) -> str:
+    if show.status == "finished":
+        return "Finished"
+    if show.status == "stopped":
+        return "Stopped"
+    today = today or utcnow().date()
+    progress = {g.episode_id: g.progress for g in grabs if g.state == "downloading"}
+    parts = []
+    downloaded = [e.number for e in episodes if e.state == "downloaded"]
+    if downloaded:
+        parts.append(f"E{max(downloaded):02} downloaded")
+    for e in sorted(episodes, key=lambda e: e.number):
+        if e.state == "downloading":
+            pct = progress.get(e.id)
+            suffix = f" {math.floor(pct * 100)}%" if pct is not None else ""
+            parts.append(f"E{e.number:02} downloading{suffix}")
+    late = sorted(
+        (e for e in episodes
+         if e.state in ("wanted", "failed") and e.tvdb_airdate and e.tvdb_airdate < today),
+        key=lambda e: e.number,
+    )
+    if late:
+        days = (today - late[0].tvdb_airdate).days
+        parts.append(
+            f"E{late[0].number:02} not found yet, {days} day{'s' if days != 1 else ''} late"
+        )
+    return " · ".join(parts) or "Waiting for episodes"
+
+
+def _session(request: Request) -> Session:
+    return request.app.state.deps.session_factory()
+
+
+def _get_show(session: Session, show_id: int) -> Show:
+    show = session.get(Show, show_id)
+    if show is None:
+        raise HTTPException(status_code=404, detail="Show not found")
+    return show
+
+
+def _render(request: Request, name: str, status_code: int = 200, **context) -> HTMLResponse:
+    return templates.TemplateResponse(request, name, context, status_code=status_code)
+
+
+def _redirect(url: str) -> RedirectResponse:
+    return RedirectResponse(url, status_code=303)
+
+
+def _safe_image(url: str | None) -> str | None:
+    return url if url and url.startswith("https://") else None
+
+
+# --- show list --------------------------------------------------------------------
+
+
+@router.get("/", response_class=HTMLResponse)
+async def show_list(request: Request):
+    with _session(request) as session:
+        shows = sorted(
+            session.scalars(select(Show)).all(),
+            key=lambda s: (_STATUS_ORDER.get(s.status, 9), s.folder_name.lower()),
+        )
+        cards = []
+        for show in shows:
+            episodes = session.scalars(select(Episode).where(Episode.show_id == show.id)).all()
+            grabs = session.scalars(
+                select(Grab).where(Grab.episode_id.in_([e.id for e in episodes]))
+            ).all()
+            cards.append({"show": show, "status": status_line(show, episodes, grabs)})
+        down = session.scalars(
+            select(SourceRow).where(SourceRow.unreachable_since.is_not(None))
+        ).all()
+    template = "_show_list.html" if request.headers.get("hx-request") == "true" else "shows.html"
+    return _render(request, template, cards=cards, down=down)
+
+
+# --- add flow ---------------------------------------------------------------------
+
+
+@router.get("/add", response_class=HTMLResponse)
+async def add_form(request: Request):
+    return _render(request, "add.html")
+
+
+@router.post("/add/search", response_class=HTMLResponse)
+async def add_search(request: Request):
+    form = await request.form()
+    query = str(form.get("query", "")).strip()[:MAX_TITLE_LEN]
+    ref = str(form.get("ref", "")).strip()[:MAX_TITLE_LEN]
+    title, season = parse_user_input(query) if query else ("", 1)
+    tvdb = request.app.state.deps.tvdb
+    matches: list[TvdbMatch] = []
+    error = None
+    if not title:
+        error = "Type the Korean name of the show."
+    elif tvdb is None:
+        error = "TVDB is not configured."
+    else:
+        try:
+            if ref and (ref.isdigit() or "/series/" in ref):
+                match = await tvdb.lookup(ref)
+                matches = [match] if match else []
+            else:
+                matches = await tvdb.search(ref or title)
+        except TvdbError as e:
+            log.warning("TVDB search failed: %s", e)
+            error = "TVDB could not be reached. Try again, or add without TVDB."
+    cards = [
+        {"m": m, "image": _safe_image(m.image_url)} for m in matches
+    ]
+    return _render(
+        request,
+        "add_results.html",
+        query=query,
+        title=title,
+        season=season,
+        ref=ref,
+        cards=cards,
+        error=error,
+        tvdb_enabled=tvdb is not None,
+    )
+
+
+@router.get("/add/confirm", response_class=HTMLResponse)
+async def add_confirm(request: Request, title: str, season: int = 1, tvdb_id: int | None = None):
+    title = title.strip()[:MAX_TITLE_LEN]
+    season = season if 1 <= season <= 99 else 1
+    tvdb = request.app.state.deps.tvdb
+    english = None
+    if tvdb_id is not None and tvdb is not None:
+        try:
+            english = await tvdb.english_name(tvdb_id)
+        except TvdbError as e:
+            log.warning("TVDB english name failed for %s: %s", tvdb_id, e)
+    tv_dir = request.app.state.settings.tv_dir
+    folder = None
+    if english:
+        folder = suggest_folder(tv_dir, english) or sanitize_folder(english)
+    folder = folder or sanitize_folder(title) or ""
+    form = {
+        "search_title": title,
+        "tvdb_id": "" if tvdb_id is None else str(tvdb_id),
+        "folder_name": folder,
+        "tvdb_season": str(season),
+        "release_season": str(season),
+    }
+    return _render(request, "confirm.html", form=form, english=english, errors=[])
+
+
+@router.post("/add")
+async def add_show(request: Request):
+    raw = await request.form()
+    form = {
+        k: str(raw.get(k, ""))
+        for k in ("search_title", "tvdb_id", "folder_name", "tvdb_season", "release_season")
+    }
+    errors = []
+    title = " ".join(form["search_title"].split())
+    if not title or len(title) > MAX_TITLE_LEN:
+        errors.append("The Korean title is missing.")
+    tvdb_id = None
+    if form["tvdb_id"].strip():
+        try:
+            tvdb_id = int(form["tvdb_id"])
+        except ValueError:
+            errors.append("Invalid TVDB id.")
+    folder = sanitize_folder(form["folder_name"])
+    if folder is None:
+        errors.append("Folder name is empty or not allowed.")
+    tvdb_season = _season(form["tvdb_season"])
+    if tvdb_season is None:
+        errors.append("TVDB season must be a number from 1 to 99.")
+    release_season = _season(form["release_season"])
+    if release_season is None:
+        errors.append("Release season must be a number from 1 to 99.")
+    with _session(request) as session:
+        if not errors:
+            dup = session.scalar(
+                select(Show).where(
+                    Show.folder_name == folder,
+                    Show.tvdb_season == tvdb_season,
+                    Show.status == "following",
+                )
+            )
+            if dup is not None:
+                return _redirect(f"/shows/{dup.id}")
+        if errors:
+            return _render(
+                request, "confirm.html", status_code=400, form=form, english=None, errors=errors
+            )
+        tv_dir = request.app.state.settings.tv_dir
+        show = Show(
+            search_title=title,
+            release_season=release_season,
+            tvdb_id=tvdb_id,
+            tvdb_season=tvdb_season,
+            folder_name=folder,
+            season_folder=season_folder_name(tv_dir / folder, tvdb_season),
+        )
+        session.add(show)
+        session.commit()
+        show_id = show.id
+    log.info("added show %s season %d", folder, tvdb_season)
+    trigger_check(request.app, show_id)
+    return _redirect(f"/shows/{show_id}")
+
+
+# --- show detail ------------------------------------------------------------------
+
+
+@router.get("/shows/{show_id}", response_class=HTMLResponse)
+async def show_detail(request: Request, show_id: int):
+    with _session(request) as session:
+        show = _get_show(session, show_id)
+        episodes = session.scalars(
+            select(Episode).where(Episode.show_id == show_id).order_by(Episode.number)
+        ).all()
+        grabs = session.scalars(
+            select(Grab)
+            .where(Grab.episode_id.in_([e.id for e in episodes]))
+            .order_by(Grab.id)
+        ).all()
+    latest = {g.episode_id: g for g in grabs}  # ordered by id, so the last one wins
+    rows = [{"ep": e, "grab": latest.get(e.id)} for e in episodes]
+    return _render(
+        request,
+        "show.html",
+        show=show,
+        rows=rows,
+        status=status_line(show, episodes, grabs),
+    )
+
+
+@router.post("/shows/{show_id}/search")
+async def show_search(request: Request, show_id: int):
+    with _session(request) as session:
+        show = _get_show(session, show_id)
+        following = show.status == "following"
+    if following:
+        trigger_check(request.app, show_id)
+    return _redirect(f"/shows/{show_id}")
+
+
+@router.post("/shows/{show_id}/episodes/{number}/retry")
+async def episode_retry(request: Request, show_id: int, number: int):
+    with _session(request) as session:
+        show = _get_show(session, show_id)
+        ep = session.scalar(
+            select(Episode).where(Episode.show_id == show_id, Episode.number == number)
+        )
+        if ep is None:
+            raise HTTPException(status_code=404, detail="Episode not found")
+        if ep.state not in ("wanted", "failed"):
+            return _redirect(f"/shows/{show_id}")
+        ep.state = "wanted"
+        session.execute(
+            delete(Grab).where(
+                Grab.episode_id == ep.id, Grab.state.in_(("failed", "add_failed"))
+            )
+        )
+        session.commit()
+        following = show.status == "following"
+    if following:
+        trigger_check(request.app, show_id)
+    return _redirect(f"/shows/{show_id}")
+
+
+@router.post("/shows/{show_id}/stop")
+async def show_stop(request: Request, show_id: int):
+    with _session(request) as session:
+        show = _get_show(session, show_id)
+        show.status = "stopped"
+        session.commit()
+        log.info("stopped following %s", show.folder_name)
+    return _redirect(f"/shows/{show_id}")
+
+
+# --- settings ---------------------------------------------------------------------
+
+SETTING_KEYS = (
+    "check_interval_minutes",
+    "stall_hours",
+    "preferred_resolution",
+    "qbit_category",
+    "qbit_save_path",
+    "path_map",
+)
+
+
+def _validate_settings(form: dict[str, str]) -> tuple[dict[str, str], list[str]]:
+    clean: dict[str, str] = {}
+    errors: list[str] = []
+    try:
+        minutes = int(form["check_interval_minutes"])
+        if not 5 <= minutes <= 1440:
+            raise ValueError
+        clean["check_interval_minutes"] = str(minutes)
+    except ValueError:
+        errors.append("Check interval must be a whole number of minutes from 5 to 1440.")
+    try:
+        hours = float(form["stall_hours"])
+        if not (math.isfinite(hours) and 1 <= hours <= 168):
+            raise ValueError
+        clean["stall_hours"] = str(int(hours)) if hours.is_integer() else str(hours)
+    except ValueError:
+        errors.append("Stall timeout must be from 1 to 168 hours.")
+    if form["preferred_resolution"] in RESOLUTIONS:
+        clean["preferred_resolution"] = form["preferred_resolution"]
+    else:
+        errors.append("Pick a resolution from the list.")
+    if _CATEGORY_RE.match(form["qbit_category"]):
+        clean["qbit_category"] = form["qbit_category"]
+    else:
+        errors.append("Category may only use letters, digits, - and _.")
+    save_path = form["qbit_save_path"].rstrip("/") or "/"
+    if (
+        (save_path == "/downloads" or save_path.startswith("/downloads/"))
+        and ".." not in save_path.split("/")
+    ):
+        clean["qbit_save_path"] = save_path
+    else:
+        errors.append("Save path must be inside /downloads.")
+    path_map = form["path_map"]
+    src, sep, dst = path_map.partition("=")
+    if not path_map or (sep and src.strip() and dst.strip()):
+        clean["path_map"] = path_map
+    else:
+        errors.append("Path map must be empty or look like /from=/to.")
+    return clean, errors
+
+
+def _sources(session: Session) -> list[SourceRow]:
+    return session.scalars(select(SourceRow).order_by(SourceRow.priority, SourceRow.id)).all()
+
+
+def _settings_page(
+    request: Request, session: Session, values: dict, errors: list[str], status_code: int = 200
+) -> HTMLResponse:
+    return _render(
+        request,
+        "settings.html",
+        status_code=status_code,
+        values=values,
+        errors=errors,
+        sources=_sources(session),
+        resolutions=RESOLUTIONS,
+    )
+
+
+@router.get("/settings", response_class=HTMLResponse)
+async def settings_form(request: Request):
+    with _session(request) as session:
+        values = {k: get_setting(session, k) for k in SETTING_KEYS}
+        return _settings_page(request, session, values, [])
+
+
+@router.post("/settings")
+async def settings_save(request: Request):
+    raw = await request.form()
+    form = {k: str(raw.get(k, "")).strip() for k in SETTING_KEYS}
+    clean, errors = _validate_settings(form)
+    with _session(request) as session:
+        if errors:
+            return _settings_page(request, session, form, errors, 400)
+        old_minutes = get_setting(session, "check_interval_minutes")
+        for key, value in clean.items():
+            set_setting(session, key, value)
+    scheduler = request.app.state.scheduler
+    if clean["check_interval_minutes"] != old_minutes and scheduler is not None:
+        reschedule_check(scheduler, int(clean["check_interval_minutes"]))
+    return _redirect("/settings")
+
+
+def _validate_source(form: dict[str, str]) -> tuple[dict, list[str]]:
+    clean: dict = {}
+    errors: list[str] = []
+    template = form.get("domain_template", "").strip()
+    if "{N}" in template and template.startswith(("https://", "http://")):
+        clean["domain_template"] = template
+    else:
+        errors.append("Domain template must start with https:// and contain {N}.")
+    current = form.get("current_url", "").strip()
+    if current.startswith(("https://", "http://")) and len(current) > len("https://"):
+        clean["current_url"] = current
+    else:
+        errors.append("Current URL must start with https:// or http://.")
+    try:
+        clean["priority"] = int(form.get("priority", ""))
+    except ValueError:
+        errors.append("Priority must be a whole number.")
+    clean["enabled"] = form.get("enabled") == "on"
+    return clean, errors
+
+
+async def _source_form(request: Request) -> dict[str, str]:
+    raw = await request.form()
+    return {k: str(v) for k, v in raw.items()}
+
+
+def _settings_error(request: Request, session: Session, errors: list[str]) -> HTMLResponse:
+    values = {k: get_setting(session, k) for k in SETTING_KEYS}
+    return _settings_page(request, session, values, errors, 400)
+
+
+@router.post("/settings/sources")
+async def source_add(request: Request):
+    form = await _source_form(request)
+    clean, errors = _validate_source(form)
+    name = form.get("name", "").strip()
+    with _session(request) as session:
+        if not _SOURCE_NAME_RE.match(name):
+            errors.append("Source name may only use letters, digits, - and _.")
+        elif session.scalar(select(SourceRow).where(SourceRow.name == name)):
+            errors.append(f"A source named {name} already exists.")
+        if errors:
+            return _settings_error(request, session, errors)
+        session.add(SourceRow(name=name, kind="torrenttip", **clean))
+        session.commit()
+    return _redirect("/settings")
+
+
+@router.post("/settings/sources/{source_id}")
+async def source_edit(request: Request, source_id: int):
+    form = await _source_form(request)
+    clean, errors = _validate_source(form)
+    with _session(request) as session:
+        row = session.get(SourceRow, source_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Source not found")
+        if errors:
+            return _settings_error(request, session, errors)
+        for key, value in clean.items():
+            setattr(row, key, value)
+        session.commit()
+    return _redirect("/settings")

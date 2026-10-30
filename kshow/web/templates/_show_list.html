@@ -1,0 +1,17 @@
+<div id="show-list" hx-get="/" hx-trigger="every 30s" hx-swap="outerHTML">
+  {% for source in down %}
+  <p class="banner" role="alert">
+    Source <strong>{{ source.name }}</strong> has been unreachable since {{ source.unreachable_since | localtime }}.
+    Check its address in <a href="/settings">Settings</a>.
+  </p>
+  {% endfor %}
+  {% for card in cards %}
+  <a class="card show-card status-{{ card.show.status }}" href="/shows/{{ card.show.id }}">
+    <span class="card-title">{{ card.show.folder_name }}</span>
+    <span class="muted">{{ card.show.search_title }} · Season {{ card.show.tvdb_season }}</span>
+    <span class="status">{{ card.status }}</span>
+  </a>
+  {% else %}
+  <p class="empty">No shows yet.</p>
+  {% endfor %}
+</div>

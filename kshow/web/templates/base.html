@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}kshow{% endblock %} · kshow</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="/">kshow</a>
+    <nav>
+      <a href="/add">Add</a>
+      <a href="/settings">Settings</a>
+    </nav>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  {% if request.app.state.settings.auth_enabled %}
+  <footer>
+    <form method="post" action="/logout"><button class="link" type="submit">Log out</button></form>
+  </footer>
+  {% endif %}
+</body>
+</html>

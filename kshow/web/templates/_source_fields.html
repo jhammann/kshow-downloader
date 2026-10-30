@@ -1,0 +1,12 @@
+{% set fid = s.id if s else "new" %}
+<label for="tpl-{{ fid }}">Domain template (use {N} for the number)</label>
+<input id="tpl-{{ fid }}" name="domain_template" type="text" inputmode="url" autocomplete="off" value="{{ s.domain_template if s else '' }}" placeholder="https://torrenttip{N}.top" required>
+<label for="url-{{ fid }}">Current address</label>
+<input id="url-{{ fid }}" name="current_url" type="url" value="{{ s.current_url if s else '' }}" required>
+<div class="row">
+  <div>
+    <label for="prio-{{ fid }}">Priority</label>
+    <input id="prio-{{ fid }}" name="priority" type="number" inputmode="numeric" value="{{ s.priority if s else 1 }}" required>
+  </div>
+  <label class="check"><input name="enabled" type="checkbox"{% if not s or s.enabled %} checked{% endif %}> Enabled</label>
+</div>

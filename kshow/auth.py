@@ -3,10 +3,11 @@ import os
 import secrets
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from authlib.integrations.starlette_client import OAuth
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from kshow.config import Settings
 
@@ -23,8 +24,41 @@ class LoginRequired(Exception):
     """Raised by require_user for unauthenticated browser requests."""
 
 
+def _is_htmx(request: Request) -> bool:
+    return request.headers.get("hx-request") == "true"
+
+
 async def login_required_handler(request: Request, exc: LoginRequired):
+    if _is_htmx(request):
+        # A 303 would be followed by XHR and the login page swapped into a fragment.
+        return Response(status_code=200, headers={"HX-Redirect": "/login"})
     return RedirectResponse("/login", status_code=303)
+
+
+def _origin(url: str) -> tuple[str, str] | None:
+    parts = urlsplit(url)
+    if not parts.scheme or not parts.netloc:
+        return None
+    return parts.scheme.lower(), parts.netloc.lower()
+
+
+def require_same_origin(request: Request) -> None:
+    """CSRF guard for state-changing requests.
+
+    Rejects a request whose Origin (or, if absent, Referer) is not this app's own
+    origin or APP_URL's. Requests with neither header are allowed.
+    """
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return
+    claimed = request.headers.get("origin") or request.headers.get("referer")
+    if not claimed:
+        return
+    allowed = {_origin(str(request.base_url))}
+    app_url = request.app.state.settings.app_url
+    if app_url:
+        allowed.add(_origin(app_url))
+    if _origin(claimed) not in allowed - {None}:
+        raise HTTPException(status_code=403, detail="Cross-origin request rejected")
 
 
 def validate_auth_settings(settings: Settings) -> None:
@@ -117,7 +151,7 @@ def require_user(request: Request) -> dict:
     user = request.session.get("user")
     if user:
         return user
-    if request.method in ("GET", "HEAD"):
+    if request.method in ("GET", "HEAD") or _is_htmx(request):
         raise LoginRequired()
     raise HTTPException(status_code=401, detail="Not authenticated")
 
@@ -198,7 +232,7 @@ async def auth_callback(request: Request):
     return RedirectResponse("/", status_code=303)
 
 
-@router.post("/logout")
+@router.post("/logout", dependencies=[Depends(require_same_origin)])
 async def logout(request: Request):
     request.session.clear()
     return RedirectResponse("/login", status_code=303)
