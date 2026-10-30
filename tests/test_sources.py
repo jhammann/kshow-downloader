@@ -183,3 +183,23 @@ async def test_build_sources_orders_and_persists_url():
         s.expire_all()
         current = s.query(SourceRow).filter_by(name="torrenttip").one().current_url
         assert current == "https://torrenttip251.top"
+
+
+@respx.mock
+async def test_fetch_torrent_dead_download_host_is_unreachable():
+    respx.get(POST).respond(200, content=(FIX / "torrenttip_post.html").read_bytes())
+    respx.get(DOWNLOAD).mock(side_effect=httpx.ConnectError("dead"))
+    client, _ = site()
+    with pytest.raises(SourceUnreachable):
+        await TorrenttipSource(client).fetch_torrent(POST)
+
+
+@respx.mock
+async def test_get_retry_after_probe_failure_is_unreachable():
+    respx.get(f"{BASE}/search").mock(side_effect=httpx.ConnectError("dead"))
+    respx.get(f"{BASE}/").mock(side_effect=httpx.ConnectError("dead"))
+    respx.get("https://torrenttip251.top/").respond(200, text="ok")
+    respx.get("https://torrenttip251.top/search").mock(side_effect=httpx.ReadTimeout("slow"))
+    client, _ = site()
+    with pytest.raises(SourceUnreachable):
+        await client.get("/search")

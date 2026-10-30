@@ -52,13 +52,16 @@ class SiteClient:
         self, path_or_url: str, referer: str | None = None
     ) -> tuple[str, bytes, str]:
         """Return (final_url, body, content_type). Relative paths use the live base URL."""
-        if path_or_url.startswith(("http://", "https://")):
-            return await self._fetch(path_or_url, referer)
         try:
-            return await self._fetch(urljoin(self._base + "/", path_or_url), referer)
-        except httpx.TransportError:
-            await self._probe()
-            return await self._fetch(urljoin(self._base + "/", path_or_url), referer)
+            if path_or_url.startswith(("http://", "https://")):
+                return await self._fetch(path_or_url, referer)
+            try:
+                return await self._fetch(urljoin(self._base + "/", path_or_url), referer)
+            except httpx.TransportError:
+                await self._probe()
+                return await self._fetch(urljoin(self._base + "/", path_or_url), referer)
+        except httpx.TransportError as e:
+            raise SourceUnreachable(f"{path_or_url} unreachable: {e!r}") from e
 
     async def resolve(self) -> str:
         """Return the live base URL, probing neighbouring domain numbers if the current one is dead."""
