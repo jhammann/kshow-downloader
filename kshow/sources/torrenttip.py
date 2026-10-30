@@ -68,12 +68,15 @@ class TorrenttipSource:
         return list(found.values())
 
     async def fetch_torrent(self, post_url: str) -> bytes:
+        if not self._client.is_site_url(post_url):
+            log.warning("refusing post URL outside the site domain: %s", post_url)
+            raise SourceUnreachable(f"post URL {post_url!r} is not on the source domain")
         final_url, body, _ = await self._client.get(post_url)
         link = HTMLParser(body.decode("utf-8", errors="replace")).css_first('a[href*="/download/"]')
         if link is None:
             raise ValueError(f"no download link on {post_url}")
         download_url = urljoin(final_url, link.attributes["href"] or "")
-        _, data, _ = await self._client.get(download_url, referer=post_url)
+        data = await self._client.get_download(download_url, referer=post_url)
         if not is_torrent(data):
             raise ValueError(f"{download_url} did not return a torrent")
         return data

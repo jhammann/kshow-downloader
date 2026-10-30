@@ -18,6 +18,16 @@ DOWNLOAD = "https://dc.filesbest.xyz/download/XKogYv/1"
 TORRENT = b"d8:announce3:foo4:infod4:name1:xee"
 
 
+@pytest.fixture(autouse=True)
+def public_dns(monkeypatch):
+    async def fake(host, port):
+        return {"dc.filesbest.xyz": ["93.184.216.34"], "internal.example": ["10.0.0.5"]}.get(
+            host, ["93.184.216.34"]
+        )
+
+    monkeypatch.setattr("kshow.sources.http._resolve_host", fake)
+
+
 def row(url=BASE):
     return SourceRow(
         id=1, name="torrenttip", kind="torrenttip",
@@ -203,3 +213,67 @@ async def test_get_retry_after_probe_failure_is_unreachable():
     client, _ = site()
     with pytest.raises(SourceUnreachable):
         await client.get("/search")
+
+
+@respx.mock
+async def test_redirect_to_parking_host_is_not_persisted():
+    respx.get(f"{BASE}/").respond(301, headers={"location": "https://parking.example/"})
+    respx.get("https://parking.example/").respond(200, text="for sale")
+    respx.route().mock(side_effect=httpx.ConnectError("dead"))
+    client, changes = site()
+    with pytest.raises(SourceUnreachable):
+        await client.resolve()
+    assert changes == []
+
+
+def test_lookalike_host_is_not_the_site():
+    client, _ = site()
+    assert client.is_site_url("https://torrenttip251.top/x")
+    assert not client.is_site_url("https://torrenttip.evil.com/x")
+    assert not client.is_site_url("https://torrenttip250.top.evil.com/x")
+    assert not client.is_site_url("http://torrenttip250.top.evil.com")
+
+
+@respx.mock
+async def test_fetch_torrent_rejects_foreign_post_url():
+    client, _ = site()
+    with pytest.raises(SourceUnreachable):
+        await TorrenttipSource(client).fetch_torrent("https://torrenttip.evil.com/t/x.html")
+    assert not respx.calls
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "bad", ["http://127.0.0.1/download/x", "http://192.168.1.10/download/x", "http://internal.example/download/x", "file:///download/x"]
+)
+async def test_download_link_to_private_host_is_rejected_without_request(bad):
+    page = (FIX / "torrenttip_post.html").read_text().replace(DOWNLOAD, bad)
+    respx.get(POST).respond(200, text=page)
+    client, _ = site()
+    with pytest.raises(SourceUnreachable):
+        await TorrenttipSource(client).fetch_torrent(POST)
+    assert [str(c.request.url) for c in respx.calls] == [POST]
+
+
+@respx.mock
+async def test_download_redirect_hop_to_private_ip_is_rejected():
+    respx.get(POST).respond(200, content=(FIX / "torrenttip_post.html").read_bytes())
+    respx.get(DOWNLOAD).respond(302, headers={"location": "http://169.254.169.254/latest"})
+    internal = respx.get("http://169.254.169.254/latest").respond(200, content=TORRENT)
+    client, _ = site()
+    with pytest.raises(SourceUnreachable):
+        await TorrenttipSource(client).fetch_torrent(POST)
+    assert not internal.called
+
+
+@respx.mock
+async def test_download_follows_public_redirect_and_caps_hops():
+    respx.get(POST).respond(200, content=(FIX / "torrenttip_post.html").read_bytes())
+    respx.get(DOWNLOAD).respond(302, headers={"location": "https://cdn.example/f.torrent"})
+    respx.get("https://cdn.example/f.torrent").respond(200, content=TORRENT)
+    client, _ = site()
+    assert await TorrenttipSource(client).fetch_torrent(POST) == TORRENT
+
+    respx.get("https://cdn.example/f.torrent").respond(302, headers={"location": "https://cdn.example/f.torrent"})
+    with pytest.raises(SourceUnreachable):
+        await TorrenttipSource(client).fetch_torrent(POST)

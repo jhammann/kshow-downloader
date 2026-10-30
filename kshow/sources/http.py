@@ -1,5 +1,8 @@
+import asyncio
+import ipaddress
 import logging
 import re
+import socket
 from collections.abc import Callable
 from urllib.parse import urljoin, urlsplit
 
@@ -13,8 +16,41 @@ PROBE_RANGE = 10
 DEFAULT_UA = "Mozilla/5.0"
 
 
+MAX_DOWNLOAD_HOPS = 5
+
+
 class SourceUnreachable(Exception):
     pass
+
+
+class _OffPattern(SourceUnreachable):
+    """A site request ended on a host that does not match the domain template."""
+
+
+async def _resolve_host(host: str, port: int) -> list[str]:
+    infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    return [info[4][0] for info in infos]
+
+
+async def _ensure_public_url(url: str) -> None:
+    """Raise SourceUnreachable unless url is http(s) and its host is only public addresses."""
+    parts = urlsplit(url)
+    host = parts.hostname
+    if parts.scheme not in ("http", "https") or not host:
+        raise SourceUnreachable(f"refusing to fetch {url!r}: not an http(s) URL")
+    try:
+        addrs = [host]
+        ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            addrs = await _resolve_host(host, parts.port or (443 if parts.scheme == "https" else 80))
+        except OSError as e:
+            raise SourceUnreachable(f"cannot resolve {host}: {e!r}") from e
+    for addr in addrs:
+        ip = ipaddress.ip_address(addr.split("%")[0])
+        if not ip.is_global:
+            log.warning("refusing to fetch %s: %s is not a public address", url, ip)
+            raise SourceUnreachable(f"refusing to fetch {url!r}: non-public address")
 
 
 def _base_of(url: str) -> str:
@@ -41,6 +77,9 @@ class SiteClient:
         on_url_change: Callable[[str], None],
     ):
         self._template = row.domain_template
+        self._pattern = re.compile(
+            "^" + re.escape(row.domain_template.rstrip("/")).replace(re.escape("{N}"), r"\d+") + "$"
+        )
         self._base = row.current_url.rstrip("/")
         self._http = http
         self._flaresolverr_url = flaresolverr_url.rstrip("/") if flaresolverr_url else None
@@ -57,7 +96,7 @@ class SiteClient:
                 return await self._fetch(path_or_url, referer)
             try:
                 return await self._fetch(urljoin(self._base + "/", path_or_url), referer)
-            except httpx.TransportError:
+            except (httpx.TransportError, _OffPattern):
                 await self._probe()
                 return await self._fetch(urljoin(self._base + "/", path_or_url), referer)
         except httpx.TransportError as e:
@@ -67,8 +106,8 @@ class SiteClient:
         """Return the live base URL, probing neighbouring domain numbers if the current one is dead."""
         try:
             await self._fetch(self._base + "/")
-        except httpx.TransportError as e:
-            log.warning("%s unreachable (%s), probing", self._base, e)
+        except (httpx.TransportError, _OffPattern) as e:
+            log.warning("%s unreachable (%r), probing", self._base, e)
             await self._probe()
         return self._base
 
@@ -93,15 +132,8 @@ class SiteClient:
         self, url: str, referer: str | None = None
     ) -> tuple[str, bytes, str]:
         host = urlsplit(url).netloc
-        is_site = host == urlsplit(self._base).netloc or url.startswith(
-            self._template.split("{N}")[0]
-        )
-        headers = {"User-Agent": self._user_agent}
-        if referer:
-            headers["Referer"] = referer
-        cookies = self._cookies.get(host)
-        if cookies:
-            headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+        is_site = self.is_site_url(url)
+        headers = self._headers(url, referer)
         resp = await self._http.get(url, headers=headers, follow_redirects=True)
         if _is_challenge(resp):
             final_url, body, ctype = await self._solve(url)
@@ -112,8 +144,40 @@ class SiteClient:
             body = resp.content
             ctype = resp.headers.get("content-type", "")
         if is_site:
-            self._note_base(_base_of(final_url))
+            final_base = _base_of(final_url)
+            if not self.is_site_url(final_base):
+                raise _OffPattern(f"{url} redirected off-site to {final_base}")
+            self._note_base(final_base)
         return final_url, body, ctype
+
+    def is_site_url(self, url: str) -> bool:
+        return bool(self._pattern.match(_base_of(url)))
+
+    def _headers(self, url: str, referer: str | None) -> dict[str, str]:
+        headers = {"User-Agent": self._user_agent}
+        if referer:
+            headers["Referer"] = referer
+        cookies = self._cookies.get(urlsplit(url).netloc)
+        if cookies:
+            headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+        return headers
+
+    async def get_download(self, url: str, referer: str) -> bytes:
+        """Fetch a scraped (untrusted) URL: public hosts only, redirects followed manually and re-checked."""
+        try:
+            for _ in range(MAX_DOWNLOAD_HOPS + 1):
+                await _ensure_public_url(url)
+                resp = await self._http.get(
+                    url, headers=self._headers(url, referer), follow_redirects=False
+                )
+                location = resp.headers.get("location")
+                if resp.is_redirect and location:
+                    url = urljoin(url, location)
+                    continue
+                return resp.content
+        except httpx.TransportError as e:
+            raise SourceUnreachable(f"{url} unreachable: {e!r}") from e
+        raise SourceUnreachable(f"too many redirects fetching {url}")
 
     def _note_base(self, new_base: str) -> None:
         if new_base != self._base:
