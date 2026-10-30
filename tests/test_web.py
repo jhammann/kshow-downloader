@@ -143,6 +143,23 @@ def test_show_list_orders_and_banners(client):
     assert client.get("/static/app.css").status_code == 200
 
 
+def test_list_partial_has_its_own_url(client):
+    _add_show(client)
+    # / is always the full page, even for htmx, and is never cached
+    r = client.get("/", headers={"HX-Request": "true"})
+    assert r.status_code == 200
+    assert "<nav>" in r.text and "<h1>Shows</h1>" in r.text
+    assert r.headers["cache-control"] == "no-store"
+    assert 'hx-get="/shows/_list"' in r.text
+
+    r = client.get("/shows/_list", headers={"HX-Request": "true"})
+    assert r.status_code == 200
+    assert r.headers["cache-control"] == "no-store"
+    assert r.text.lstrip().startswith('<div id="show-list"')
+    assert "<nav>" not in r.text and "<html" not in r.text
+    assert "The Wonder Coach" in r.text
+
+
 # --- add flow -------------------------------------------------------------------
 
 
@@ -504,6 +521,9 @@ def test_htmx_request_gets_hx_redirect_when_logged_out(settings):
     )
     with TestClient(create_app(oidc), follow_redirects=False) as c:
         r = c.get("/", headers={"HX-Request": "true"})
+        assert r.headers.get("HX-Redirect") == "/login"
+        assert r.status_code == 200 and r.text == ""
+        r = c.get("/shows/_list", headers={"HX-Request": "true"})
         assert r.headers.get("HX-Redirect") == "/login"
         assert r.status_code == 200 and r.text == ""
         r = c.post("/add/search", data={"query": "x"}, headers={"HX-Request": "true"})

@@ -136,8 +136,7 @@ def _safe_image(url: str | None) -> str | None:
 # --- show list --------------------------------------------------------------------
 
 
-@router.get("/", response_class=HTMLResponse)
-async def show_list(request: Request):
+def _show_cards(request: Request) -> dict:
     with _session(request) as session:
         shows = sorted(
             session.scalars(select(Show)).all(),
@@ -153,8 +152,25 @@ async def show_list(request: Request):
         down = session.scalars(
             select(SourceRow).where(SourceRow.unreachable_since.is_not(None))
         ).all()
-    template = "_show_list.html" if request.headers.get("hx-request") == "true" else "shows.html"
-    return _render(request, template, cards=cards, down=down)
+    return {"cards": cards, "down": down}
+
+
+_NO_STORE = {"Cache-Control": "no-store"}
+
+
+@router.get("/", response_class=HTMLResponse)
+async def show_list(request: Request):
+    response = _render(request, "shows.html", **_show_cards(request))
+    response.headers.update(_NO_STORE)
+    return response
+
+
+@router.get("/shows/_list", response_class=HTMLResponse)
+async def show_list_partial(request: Request):
+    """The polled fragment; a separate URL so it never lands in the cache entry for /."""
+    response = _render(request, "_show_list.html", **_show_cards(request))
+    response.headers.update(_NO_STORE)
+    return response
 
 
 # --- add flow ---------------------------------------------------------------------

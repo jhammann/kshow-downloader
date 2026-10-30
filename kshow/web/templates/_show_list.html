@@ -1,4 +1,4 @@
-<div id="show-list" hx-get="/" hx-trigger="every 30s" hx-swap="outerHTML">
+<div id="show-list" hx-get="/shows/_list" hx-trigger="every 30s" hx-swap="outerHTML">
   {% for source in down %}
   <p class="banner" role="alert">
     Source <strong>{{ source.name }}</strong> has been unreachable since {{ source.unreachable_since | localtime }}.
