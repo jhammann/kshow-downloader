@@ -6,6 +6,7 @@ from kshow.qbit import QbitClient, QbitError, QbitFile, QbitTorrent
 
 URL = "http://qbit:8080"
 API = f"{URL}/api/v2"
+H1 = "a" * 40
 
 
 def login_ok(sid="abc"):
@@ -120,16 +121,16 @@ async def test_files(client):
     route = respx.get(f"{API}/torrents/files").mock(
         return_value=httpx.Response(200, json=[{"name": "a/b.mkv", "size": 10}])
     )
-    assert await client.files("h1") == [QbitFile("a/b.mkv", 10)]
-    assert route.calls[0].request.url.params["hash"] == "h1"
+    assert await client.files(H1) == [QbitFile("a/b.mkv", 10)]
+    assert route.calls[0].request.url.params["hash"] == H1
 
 
 @respx.mock
 async def test_delete(client):
     respx.post(f"{API}/auth/login").mock(return_value=login_ok())
     route = respx.post(f"{API}/torrents/delete").mock(return_value=httpx.Response(200))
-    await client.delete("h1", True)
-    assert b"hashes=h1" in route.calls[0].request.content
+    await client.delete(H1, True)
+    assert b"hashes=" + H1.encode() in route.calls[0].request.content
     assert b"deleteFiles=true" in route.calls[0].request.content
 
 
@@ -170,3 +171,35 @@ async def test_sid_cookie_not_stored_in_shared_client_jar(client, http):
     respx.get(f"{API}/torrents/info").mock(return_value=httpx.Response(200, json=[]))
     await client.torrents("kshow")
     assert not any(c.name == "SID" for c in http.cookies.jar)
+
+
+@respx.mock
+@pytest.mark.parametrize("bad", ["all", "a|b", "", "g" * 40, "a" * 39, H1 + "|" + H1])
+async def test_delete_rejects_bad_hash_without_request(client, bad):
+    with pytest.raises(QbitError):
+        await client.delete(bad, True)
+    assert respx.calls.call_count == 0
+
+
+@respx.mock
+async def test_files_rejects_bad_hash_without_request(client):
+    with pytest.raises(QbitError):
+        await client.files("all")
+    assert respx.calls.call_count == 0
+
+
+@respx.mock
+async def test_accepts_sha256_hash(client):
+    respx.post(f"{API}/auth/login").mock(return_value=login_ok())
+    respx.post(f"{API}/torrents/delete").mock(return_value=httpx.Response(200))
+    await client.delete("B" * 64, False)
+
+
+@respx.mock
+@pytest.mark.parametrize("cat", ["", "   "])
+async def test_empty_category_rejected_without_request(client, cat):
+    with pytest.raises(QbitError):
+        await client.torrents(cat)
+    with pytest.raises(QbitError):
+        await client.add_torrent(b"x", "a.torrent", cat, "/dl", "t")
+    assert respx.calls.call_count == 0

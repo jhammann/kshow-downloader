@@ -1,11 +1,14 @@
 """Minimal qBittorrent Web API v2 client."""
 
 import logging
+import re
 from dataclasses import dataclass
 
 import httpx
 
 log = logging.getLogger(__name__)
+
+_HASH = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$", re.IGNORECASE)
 
 
 class QbitError(Exception):
@@ -77,6 +80,18 @@ class QbitClient:
         return resp
 
     @staticmethod
+    def _check_hash(hash: str) -> None:
+        # qBittorrent treats "all" and "a|b" specially; only accept a single real hash.
+        if not isinstance(hash, str) or not _HASH.fullmatch(hash):
+            raise QbitError(f"invalid torrent hash: {hash!r}")
+
+    @staticmethod
+    def _check_category(category: str) -> None:
+        # An empty category means "uncategorised" in qBittorrent, which the app does not own.
+        if not category or not category.strip():
+            raise QbitError("category must not be empty")
+
+    @staticmethod
     def _json(resp: httpx.Response, path: str):
         try:
             return resp.json()
@@ -86,6 +101,7 @@ class QbitClient:
     async def add_torrent(
         self, data: bytes, filename: str, category: str, save_path: str, tag: str
     ) -> None:
+        self._check_category(category)
         resp = await self._request(
             "POST",
             "/torrents/add",
@@ -96,6 +112,7 @@ class QbitClient:
             raise QbitError(f"qBittorrent rejected torrent: {resp.text.strip()[:200]!r}")
 
     async def torrents(self, category: str) -> list[QbitTorrent]:
+        self._check_category(category)
         resp = await self._request("GET", "/torrents/info", params={"category": category})
         try:
             return [
@@ -112,6 +129,7 @@ class QbitClient:
             raise QbitError("qBittorrent /torrents/info returned unexpected data") from exc
 
     async def files(self, hash: str) -> list[QbitFile]:
+        self._check_hash(hash)
         resp = await self._request("GET", "/torrents/files", params={"hash": hash})
         try:
             return [
@@ -122,6 +140,7 @@ class QbitClient:
             raise QbitError("qBittorrent /torrents/files returned unexpected data") from exc
 
     async def delete(self, hash: str, delete_files: bool) -> None:
+        self._check_hash(hash)
         await self._request(
             "POST",
             "/torrents/delete",
