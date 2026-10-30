@@ -14,6 +14,8 @@ from kshow.qbit import QbitError, QbitFile, QbitTorrent
 
 log = logging.getLogger(__name__)
 
+TORRENT_GONE_AFTER = timedelta(minutes=15)
+
 
 def map_path(qbit_path: str, path_map: str) -> Path:
     """Translate a qBittorrent path to ours using a "from=to" prefix map (empty = identity)."""
@@ -106,9 +108,19 @@ async def _process(
 
     matches = [t for t in torrents if grab.qbit_tag in t.tags]
     if not matches:
-        log.warning("torrent for %s (%s) is gone from qBittorrent", label, grab.qbit_tag)
-        _fail(session, grab, ep)
+        # qBittorrent may list a partial category while it restarts; give it time.
+        now = utcnow()
+        if grab.torrent_missing_since is None:
+            log.warning("torrent for %s (%s) not in qBittorrent; waiting", label, grab.qbit_tag)
+            grab.torrent_missing_since = now
+            session.commit()
+        elif now - grab.torrent_missing_since >= TORRENT_GONE_AFTER:
+            log.warning("torrent for %s (%s) is gone from qBittorrent", label, grab.qbit_tag)
+            _fail(session, grab, ep)
         return
+    if grab.torrent_missing_since is not None:
+        grab.torrent_missing_since = None
+        session.commit()
     if len(matches) > 1:
         log.error("%d torrents carry tag %s; leaving %s alone", len(matches), grab.qbit_tag, label)
         return

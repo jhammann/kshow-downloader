@@ -61,6 +61,10 @@ class Grab(Base):
     progress: Mapped[float] = mapped_column(default=0)
     last_progress_at: Mapped[datetime] = mapped_column(default=utcnow)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    # First poll at which the torrent was absent from qBittorrent's category list.
+    torrent_missing_since: Mapped[datetime | None]
+    # First poll at which a seeding torrent's file was missing on disk.
+    missing_since: Mapped[datetime | None]
 
 
 class SourceRow(Base):

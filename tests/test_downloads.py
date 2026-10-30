@@ -101,6 +101,14 @@ def state(db, tag) -> tuple[Grab, Episode]:
         return grab, s.get(Episode, grab.episode_id)
 
 
+def update_grab(db, tag, **fields) -> None:
+    with db() as s:
+        grab = s.scalar(select(Grab).where(Grab.qbit_tag == tag))
+        for key, value in fields.items():
+            setattr(grab, key, value)
+        s.commit()
+
+
 def torrent(tag, progress, save_path, hash=HASH, tags=None):
     return {
         "hash": hash,
@@ -269,11 +277,30 @@ async def test_progress_update_resets_stall_clock(db, http, dirs):
 
 
 @respx.mock
-async def test_missing_torrent_marks_wanted(db, http, dirs):
+async def test_missing_torrent_waits_before_failing(db, http, dirs):
     downloads, _ = dirs
     tag = add_grab(db)
     other = add_grab(db, number=5)
-    delete, _ = mock_qbit([torrent(other, 0.1, downloads / "kshow", tags="kshow-999")])
+    delete, apprise = mock_qbit([torrent(other, 0.1, downloads / "kshow", tags="kshow-999")])
+
+    await process_downloads(make_deps(db, http, dirs))
+
+    grab, ep = state(db, tag)
+    assert grab.state == "downloading" and ep.state == "downloading"
+    assert grab.torrent_missing_since > utcnow() - timedelta(minutes=1)
+    first_seen = grab.torrent_missing_since
+
+    await process_downloads(make_deps(db, http, dirs))
+    assert state(db, tag)[0].torrent_missing_since == first_seen
+    assert state(db, tag)[0].state == "downloading"
+    assert delete.call_count == 0 and apprise.call_count == 0
+
+
+@respx.mock
+async def test_torrent_missing_for_15_minutes_marks_wanted(db, http, dirs):
+    tag = add_grab(db)
+    update_grab(db, tag, torrent_missing_since=utcnow() - timedelta(minutes=15, seconds=1))
+    delete, _ = mock_qbit([])
 
     await process_downloads(make_deps(db, http, dirs))
 
@@ -283,9 +310,23 @@ async def test_missing_torrent_marks_wanted(db, http, dirs):
 
 
 @respx.mock
+async def test_torrent_seen_again_clears_missing_clock(db, http, dirs):
+    downloads, _ = dirs
+    tag = add_grab(db, progress=0.2)
+    update_grab(db, tag, torrent_missing_since=utcnow() - timedelta(minutes=10))
+    mock_qbit([torrent(tag, 0.2, downloads / "kshow")])
+
+    await process_downloads(make_deps(db, http, dirs))
+
+    grab, _ = state(db, tag)
+    assert grab.state == "downloading" and grab.torrent_missing_since is None
+
+
+@respx.mock
 async def test_tag_matches_exactly(db, http, dirs):
     downloads, _ = dirs
     tag = add_grab(db)  # kshow-1
+    update_grab(db, tag, torrent_missing_since=utcnow() - timedelta(hours=1))
     mock_qbit([torrent(tag, 0.5, downloads / "kshow", tags="kshow-10, kshow-11")])
 
     await process_downloads(make_deps(db, http, dirs))
