@@ -273,30 +273,67 @@ async def test_qbit_down_keeps_episode_wanted(db, http, tmp_path):
 
 
 @respx.mock
-async def test_qbit_add_failure_then_retry_uses_new_tag(db, http, tmp_path):
+async def test_qbit_add_failure_then_retry_reuses_grab_and_tag(db, http, tmp_path):
     mock_search("신인감독 김연경 2.E04.261101.720p-NEXT")
     mock_post(1)
     respx.post(f"{QBIT}/api/v2/auth/login").respond(
         200, text="Ok.", headers={"Set-Cookie": "SID=abc; path=/"}
     )
     add = respx.post(f"{QBIT}/api/v2/torrents/add").mock(
-        side_effect=[httpx.ReadTimeout("slow"), httpx.Response(200, text="Ok.")]
+        side_effect=[
+            httpx.ReadTimeout("slow"),
+            httpx.Response(409, text="Fails."),
+            httpx.Response(
+                200,
+                json={"success_count": 1, "failure_count": 0, "pending_count": 0,
+                      "added_torrent_ids": ["a" * 40]},
+            ),
+        ]
     )
     show_id = add_show(db)
     deps = make_deps(db, http, tmp_path)
 
     await check_show(deps, show_id)
+    await check_show(deps, show_id)
     assert episodes(db, show_id)[4].state == "wanted"
+    with db() as s:
+        stale = utcnow() - timedelta(hours=7)
+        s.scalars(select(Grab)).one().last_progress_at = stale
+        s.commit()
     await check_show(deps, show_id)
 
-    assert add.call_count == 2
+    assert add.call_count == 3
     with db() as s:
-        grabs = s.scalars(select(Grab).order_by(Grab.id)).all()
-        assert [g.state for g in grabs] == ["add_failed", "downloading"]
-        assert grabs[0].qbit_tag != grabs[1].qbit_tag
-        for call, grab in zip(add.calls, grabs):
+        grab = s.scalars(select(Grab)).one()
+        assert grab.state == "downloading"
+        assert grab.last_progress_at > utcnow() - timedelta(minutes=1)
+        for call in add.calls:
             assert f'\r\n\r\n{grab.qbit_tag}\r\n'.encode() in call.request.content
     assert episodes(db, show_id)[4].state == "downloading"
+
+
+@respx.mock
+async def test_add_failed_for_other_post_gets_a_new_grab(db, http, tmp_path):
+    mock_search("신인감독 김연경 2.E04.261101.720p-NEXT")
+    mock_post(1)
+    add = mock_qbit()
+    show_id = add_show(db)
+    with db() as s:
+        ep = Episode(show_id=show_id, number=4)
+        s.add(ep)
+        s.flush()
+        s.add(Grab(episode_id=ep.id, post_url=f"{SITE}/t/other.html", release_name="x",
+                   qbit_tag="kshow-1", state="add_failed"))
+        s.commit()
+
+    await check_show(make_deps(db, http, tmp_path), show_id)
+
+    assert add.call_count == 1
+    with db() as s:
+        grabs = s.scalars(select(Grab).order_by(Grab.id)).all()
+        assert [(g.qbit_tag, g.state) for g in grabs] == [
+            ("kshow-1", "add_failed"), ("kshow-2", "downloading"),
+        ]
 
 
 @respx.mock

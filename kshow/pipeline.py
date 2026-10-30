@@ -161,15 +161,27 @@ async def _grab(
             )
             session.commit()
             continue
-        # Commit the grab (and its tag) before qBittorrent sees it, so a tag that may
-        # exist in qBittorrent always belongs to a persisted grab and is never reused.
-        grab = Grab(
-            episode_id=ep.id, post_url=c.post_url, release_name=c.release.raw, qbit_tag=""
+        # Retry an earlier failed add of this same post under its own grab and tag, so
+        # repeated qBittorrent outages don't pile up rows.
+        grab = session.scalar(
+            select(Grab)
+            .where(
+                Grab.episode_id == ep.id,
+                Grab.post_url == c.post_url,
+                Grab.state == "add_failed",
+            )
+            .order_by(Grab.id.desc())
         )
-        session.add(grab)
-        session.flush()
-        grab.qbit_tag = f"kshow-{grab.id}"
-        session.commit()
+        if grab is None:
+            # Commit the grab (and its tag) before qBittorrent sees it, so a tag that may
+            # exist in qBittorrent always belongs to a persisted grab and is never reused.
+            grab = Grab(
+                episode_id=ep.id, post_url=c.post_url, release_name=c.release.raw, qbit_tag=""
+            )
+            session.add(grab)
+            session.flush()
+            grab.qbit_tag = f"kshow-{grab.id}"
+            session.commit()
         try:
             await deps.qbit.add_torrent(
                 data,
@@ -183,6 +195,10 @@ async def _grab(
             grab.state = "add_failed"
             session.commit()
             return
+        grab.state = "downloading"
+        grab.release_name = c.release.raw
+        grab.progress = 0
+        grab.last_progress_at = utcnow()
         ep.state = "downloading"
         session.commit()
         log.info("grabbed %s for %s E%02d", c.release.raw, show.folder_name, number)

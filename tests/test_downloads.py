@@ -55,7 +55,9 @@ def make_deps(db, http, dirs) -> Deps:
     )
 
 
-def add_grab(db, state="downloading", progress=0.0, last_progress_at=None, number=4) -> str:
+def add_grab(
+    db, state="downloading", progress=0.0, last_progress_at=None, number=4, ep_state=None
+) -> str:
     """Create show + episode + grab; return the grab's qBittorrent tag."""
     with db() as s:
         show = s.scalar(select(Show))
@@ -70,8 +72,12 @@ def add_grab(db, state="downloading", progress=0.0, last_progress_at=None, numbe
             )
             s.add(show)
             s.flush()
-        ep = Episode(show_id=show.id, number=number, state="downloading")
-        s.add(ep)
+        ep = s.scalar(select(Episode).where(Episode.number == number))
+        if ep is None:
+            ep = Episode(show_id=show.id, number=number)
+            s.add(ep)
+        if ep_state is not None or ep.state != "downloaded":
+            ep.state = ep_state or "downloading"
         s.flush()
         grab = Grab(
             episode_id=ep.id,
@@ -310,21 +316,102 @@ async def test_duplicate_tag_touches_nothing(db, http, dirs):
 
 
 @respx.mock
-async def test_non_downloading_grabs_untouched(db, http, dirs):
+async def test_failed_and_done_grabs_untouched(db, http, dirs):
     downloads, tv = dirs
-    states = ((1, "add_failed"), (2, "failed"), (3, "done"))
+    states = ((2, "failed"), (3, "done"))
     tags = [add_grab(db, state=s, number=n) for n, s in states]
     write(downloads / "kshow/ep.mp4", b"e")
     delete, apprise = mock_qbit(
-        [torrent(t, 1.0, downloads / "kshow") for t in tags[:1]],
+        [torrent(t, 1.0, downloads / "kshow", hash=h) for t, h in zip(tags, (HASH, HASH2))],
         [{"name": "ep.mp4", "size": 1}],
     )
 
     await process_downloads(make_deps(db, http, dirs))
 
     assert delete.call_count == 0 and apprise.call_count == 0
-    assert [state(db, t)[0].state for t in tags] == ["add_failed", "failed", "done"]
+    assert [state(db, t)[0].state for t in tags] == ["failed", "done"]
     assert list(tv.iterdir()) == []
+
+
+# ---- adopting torrents whose add was reported as failed ----
+
+
+@respx.mock
+async def test_add_failed_grab_with_torrent_is_adopted_and_processed(db, http, dirs):
+    downloads, tv = dirs
+    tag = add_grab(db, state="add_failed", ep_state="wanted",
+                   last_progress_at=utcnow() - timedelta(days=2))
+    write(downloads / "kshow/ep.mp4", b"e")
+    delete, apprise = mock_qbit(
+        [torrent(tag, 1.0, downloads / "kshow")], [{"name": "ep.mp4", "size": 1}]
+    )
+
+    await process_downloads(make_deps(db, http, dirs))
+
+    assert (tv / DEST).read_bytes() == b"e"
+    grab, ep = state(db, tag)
+    assert grab.state == "done" and ep.state == "downloaded"
+
+
+@respx.mock
+async def test_adopted_grab_gets_a_fresh_stall_clock(db, http, dirs):
+    downloads, _ = dirs
+    tag = add_grab(db, state="add_failed", ep_state="wanted",
+                   last_progress_at=utcnow() - timedelta(days=2))
+    delete, _ = mock_qbit([torrent(tag, 0.0, downloads / "kshow")])
+
+    await process_downloads(make_deps(db, http, dirs))
+
+    assert delete.call_count == 0
+    grab, ep = state(db, tag)
+    assert grab.state == "downloading" and ep.state == "downloading"
+
+
+@respx.mock
+async def test_add_failed_without_torrent_stays_add_failed(db, http, dirs):
+    tag = add_grab(db, state="add_failed", ep_state="wanted")
+    delete, _ = mock_qbit([])
+
+    await process_downloads(make_deps(db, http, dirs))
+
+    grab, ep = state(db, tag)
+    assert grab.state == "add_failed" and ep.state == "wanted"
+    assert delete.call_count == 0
+
+
+@respx.mock
+@pytest.mark.parametrize("other", ["downloading", "done"])
+async def test_add_failed_duplicate_torrent_is_deleted(db, http, dirs, other):
+    downloads, _ = dirs
+    first = add_grab(db, state="add_failed", ep_state="wanted")
+    second = add_grab(db, state=other, ep_state="wanted", progress=0.5)
+    delete, _ = mock_qbit(
+        [
+            torrent(first, 0.5, downloads / "kshow"),
+            torrent(second, 0.5, downloads / "kshow", hash=HASH2),
+        ]
+    )
+
+    await process_downloads(make_deps(db, http, dirs))
+
+    assert delete.call_count == 1
+    sent = delete.calls.last.request.content.decode()
+    assert f"hashes={HASH}" in sent and "deleteFiles=true" in sent
+    assert state(db, first)[0].state == "add_failed"
+    assert state(db, second)[0].state == other
+
+
+@respx.mock
+async def test_add_failed_for_downloaded_episode_deletes_torrent(db, http, dirs):
+    downloads, _ = dirs
+    tag = add_grab(db, state="add_failed", ep_state="downloaded")
+    delete, _ = mock_qbit([torrent(tag, 0.5, downloads / "kshow")])
+
+    await process_downloads(make_deps(db, http, dirs))
+
+    assert delete.call_count == 1
+    grab, ep = state(db, tag)
+    assert grab.state == "add_failed" and ep.state == "downloaded"
 
 
 @respx.mock

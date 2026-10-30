@@ -203,3 +203,45 @@ async def test_empty_category_rejected_without_request(client, cat):
     with pytest.raises(QbitError):
         await client.add_torrent(b"x", "a.torrent", cat, "/dl", "t")
     assert respx.calls.call_count == 0
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "counts",
+    [
+        {"success_count": 1, "failure_count": 0, "pending_count": 0},
+        {"success_count": 0, "failure_count": 0, "pending_count": 1},
+    ],
+)
+async def test_add_accepts_v2_14_json_success(client, counts):
+    respx.post(f"{API}/auth/login").mock(return_value=login_ok())
+    body = {**counts, "added_torrent_ids": [H1]}
+    respx.post(f"{API}/torrents/add").mock(return_value=httpx.Response(200, json=body))
+    await client.add_torrent(b"x", "a.torrent", "kshow", "/dl", "t")
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(409, text="Fails."),
+        httpx.Response(
+            200,
+            json={"success_count": 1, "failure_count": 1, "pending_count": 0,
+                  "added_torrent_ids": []},
+        ),
+        httpx.Response(
+            200,
+            json={"success_count": 0, "failure_count": 0, "pending_count": 0,
+                  "added_torrent_ids": []},
+        ),
+        httpx.Response(200, json={"unexpected": True}),
+        httpx.Response(200, json=[1, 2]),
+        httpx.Response(200, text="garbage"),
+    ],
+)
+async def test_add_rejections_raise(client, response):
+    respx.post(f"{API}/auth/login").mock(return_value=login_ok())
+    respx.post(f"{API}/torrents/add").mock(return_value=response)
+    with pytest.raises(QbitError):
+        await client.add_torrent(b"x", "a.torrent", "kshow", "/dl", "t")

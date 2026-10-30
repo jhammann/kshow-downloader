@@ -108,8 +108,19 @@ class QbitClient:
             files={"torrents": (filename, data, "application/x-bittorrent")},
             data={"category": category, "savepath": save_path, "tags": tag},
         )
-        if resp.text.strip() != "Ok.":
-            raise QbitError(f"qBittorrent rejected torrent: {resp.text.strip()[:200]!r}")
+        # Web API < 2.14 answers "Ok." / "Fails."; qBittorrent 5.2+ (API 2.14) answers
+        # JSON counts, or HTTP 409 (raised by _request) when nothing was added.
+        text = resp.text.strip()
+        if text == "Ok.":
+            return
+        try:
+            body = resp.json()
+            success = int(body["success_count"]) + int(body["pending_count"])
+            failures = int(body["failure_count"])
+        except (ValueError, KeyError, TypeError):
+            raise QbitError(f"qBittorrent rejected torrent: {text[:200]!r}") from None
+        if failures > 0 or success < 1:
+            raise QbitError(f"qBittorrent rejected torrent: {text[:200]!r}")
 
     async def torrents(self, category: str) -> list[QbitTorrent]:
         self._check_category(category)

@@ -127,10 +127,38 @@ async def _process(
         await deps.notifier.send("Download failed", f"Download failed: {label}")
 
 
+async def _adopt(session: Session, deps: Deps, grab: Grab, torrents: list[QbitTorrent]) -> None:
+    """A grab whose add was reported as failed but whose torrent is in qBittorrent anyway."""
+    matches = [t for t in torrents if grab.qbit_tag in t.tags]
+    if not matches:
+        return
+    ep = session.get(Episode, grab.episode_id)
+    taken = session.scalar(
+        select(Grab.id).where(
+            Grab.episode_id == ep.id,
+            Grab.id != grab.id,
+            Grab.state.in_(("downloading", "done")),
+        )
+    )
+    if ep.state == "wanted" and taken is None:
+        log.info("adopting torrent %s whose add was reported as failed", grab.qbit_tag)
+        grab.state = "downloading"
+        grab.progress = 0
+        grab.last_progress_at = utcnow()
+        ep.state = "downloading"
+        session.commit()
+        return
+    log.info("removing duplicate torrent %s: episode already handled", grab.qbit_tag)
+    for t in matches:
+        await deps.qbit.delete(t.hash, True)
+
+
 async def process_downloads(deps: Deps) -> None:
     with deps.session_factory() as session:
         grabs = session.scalars(
-            select(Grab).where(Grab.state == "downloading", Grab.qbit_tag != "").order_by(Grab.id)
+            select(Grab)
+            .where(Grab.state.in_(("downloading", "add_failed")), Grab.qbit_tag != "")
+            .order_by(Grab.id)
         ).all()
         if not grabs:
             return
@@ -138,6 +166,10 @@ async def process_downloads(deps: Deps) -> None:
         try:
             torrents = await deps.qbit.torrents(get_setting(session, "qbit_category"))
             for grab in grabs:
-                await _process(session, deps, grab, torrents, stall)
+                if grab.state == "add_failed":
+                    await _adopt(session, deps, grab, torrents)
+            for grab in grabs:
+                if grab.state == "downloading":
+                    await _process(session, deps, grab, torrents, stall)
         except QbitError as e:
             log.warning("qBittorrent unavailable, download processing deferred: %s", e)
