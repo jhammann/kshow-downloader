@@ -29,6 +29,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 filterwarnings = [
+    "error",
     "ignore:Using `httpx` with `starlette.testclient`",
     "ignore::authlib.deprecate.AuthlibDeprecationWarning",
 ]
