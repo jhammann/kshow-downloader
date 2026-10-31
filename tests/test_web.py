@@ -417,6 +417,53 @@ def test_cross_origin_post_rejected(client, triggered):
     assert r.status_code == 303
 
 
+# --- posters --------------------------------------------------------------------
+
+POSTER = "https://artworks.thetvdb.com/1.jpg"
+
+
+@respx.mock
+def test_poster_carried_from_search_to_new_show(client):
+    _mock_tvdb()
+    r = client.post("/add/search", data={"query": "신인감독 김연경 2"})
+    assert "poster=https%3A%2F%2Fartworks.thetvdb.com%2F1.jpg" in r.text
+
+    r = client.get(
+        "/add/confirm",
+        params={"tvdb_id": 123, "title": "신인감독 김연경", "season": 2, "poster": POSTER},
+    )
+    assert f'name="poster_url" value="{POSTER}"' in r.text
+    assert f'src="{POSTER}"' in r.text and 'referrerpolicy="no-referrer"' in r.text
+
+    r = client.post(
+        "/add",
+        data={"search_title": "신인감독 김연경", "tvdb_id": "123",
+              "folder_name": "The Wonder Coach", "tvdb_season": "2",
+              "release_season": "2", "poster_url": POSTER},
+    )
+    assert r.status_code == 303
+    with _session(client) as s:
+        assert s.scalar(select(Show)).poster_url == POSTER
+
+
+@pytest.mark.parametrize(
+    "poster,tvdb_id",
+    [("http://artworks.thetvdb.com/1.jpg", "123"), ("javascript:alert(1)", "123"),
+     (POSTER, "")],
+)
+def test_poster_must_be_https_and_linked_to_tvdb(client, poster, tvdb_id):
+    r = client.get("/add/confirm", params={"title": "x", "season": 1, "poster": poster})
+    assert "javascript:" not in r.text and "http://artworks" not in r.text
+    r = client.post(
+        "/add",
+        data={"search_title": "x", "tvdb_id": tvdb_id, "folder_name": "X",
+              "tvdb_season": "1", "release_season": "1", "poster_url": poster},
+    )
+    assert r.status_code == 303
+    with _session(client) as s:
+        assert s.scalar(select(Show)).poster_url is None
+
+
 # --- show page actions ----------------------------------------------------------
 
 

@@ -18,6 +18,11 @@ class TvdbError(Exception):
     """Any TVDB failure: transport error, login failure or unexpected status."""
 
 
+def safe_image_url(url: str | None) -> str | None:
+    """url when it is an https:// address safe to put in an <img src>, else None."""
+    return url if isinstance(url, str) and url.startswith("https://") else None
+
+
 def _eng(translations) -> str | None:
     return translations.get("eng") if isinstance(translations, dict) else None
 

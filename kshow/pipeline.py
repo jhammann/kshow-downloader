@@ -22,7 +22,7 @@ from kshow.sources.torrenttip import (
     build_sources,
     is_torrent,
 )
-from kshow.tvdb import TvdbClient, TvdbError
+from kshow.tvdb import TvdbClient, TvdbError, safe_image_url
 
 log = logging.getLogger(__name__)
 
@@ -102,6 +102,21 @@ async def _sync_tvdb(session: Session, deps: Deps, show: Show) -> set[int] | Non
         show.season_first_aired = min(aired)
     session.commit()
     return {t.number for t in tvdb_eps}
+
+
+async def _backfill_poster(session: Session, deps: Deps, show: Show) -> None:
+    """Fetch the TVDB series image for a linked show that has no poster yet."""
+    if show.poster_url or show.tvdb_id is None or deps.tvdb is None:
+        return
+    try:
+        match = await deps.tvdb.lookup(str(show.tvdb_id))
+    except TvdbError as e:
+        log.info("TVDB poster lookup failed for %s: %s", show.folder_name, e)
+        return
+    poster = safe_image_url(match.image_url) if match else None
+    if poster:
+        show.poster_url = poster
+        session.commit()
 
 
 async def _search(
@@ -212,6 +227,8 @@ async def check_show(deps: Deps, show_id: int) -> None:
 
         # 1. TVDB episode sync
         tvdb_numbers = await _sync_tvdb(session, deps, show)
+        if tvdb_numbers is not None:  # TVDB answered, so a poster lookup is worth trying
+            await _backfill_poster(session, deps, show)
 
         # 2. Episodes already in the library
         season_dir = deps.settings.tv_dir / show.folder_name / show.season_folder

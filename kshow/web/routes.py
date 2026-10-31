@@ -20,7 +20,7 @@ from kshow.db import Episode, Grab, Show, SourceRow, get_setting, set_setting, u
 from kshow.library import season_folder_name, suggest_folder
 from kshow.releases import parse_user_input
 from kshow.scheduler import reschedule_check, trigger_check
-from kshow.tvdb import TvdbError, TvdbMatch
+from kshow.tvdb import TvdbError, TvdbMatch, safe_image_url
 
 log = logging.getLogger(__name__)
 
@@ -168,8 +168,11 @@ def _redirect(url: str) -> RedirectResponse:
     return RedirectResponse(url, status_code=303)
 
 
-def _safe_image(url: str | None) -> str | None:
-    return url if url and url.startswith("https://") else None
+MAX_URL_LEN = 1000
+
+
+def _poster(url: str | None) -> str | None:
+    return safe_image_url(url) if url and len(url) <= MAX_URL_LEN else None
 
 
 # --- show list --------------------------------------------------------------------
@@ -244,7 +247,7 @@ async def add_search(request: Request):
             log.warning("TVDB search failed: %s", e)
             error = "TVDB could not be reached. Try again, or add without TVDB."
     cards = [
-        {"m": m, "image": _safe_image(m.image_url)} for m in matches
+        {"m": m, "image": _poster(m.image_url)} for m in matches
     ]
     return _render(
         request,
@@ -260,7 +263,13 @@ async def add_search(request: Request):
 
 
 @router.get("/add/confirm", response_class=HTMLResponse)
-async def add_confirm(request: Request, title: str, season: int = 1, tvdb_id: int | None = None):
+async def add_confirm(
+    request: Request,
+    title: str,
+    season: int = 1,
+    tvdb_id: int | None = None,
+    poster: str | None = None,
+):
     title = title.strip()[:MAX_TITLE_LEN]
     season = season if 1 <= season <= 99 else 1
     tvdb = request.app.state.deps.tvdb
@@ -284,6 +293,7 @@ async def add_confirm(request: Request, title: str, season: int = 1, tvdb_id: in
         "folder_name": folder or "",
         "tvdb_season": str(season),
         "release_season": str(season),
+        "poster_url": (_poster(poster) or "") if tvdb_id is not None else "",
     }
     notes = [_SANITISED_NOTE.format(folder)] if changed else []
     return _render_confirm(request, form, english=english, notes=notes)
@@ -327,7 +337,10 @@ async def add_show(request: Request):
     raw = await request.form()
     form = {
         k: str(raw.get(k, ""))
-        for k in ("search_title", "tvdb_id", "folder_name", "tvdb_season", "release_season")
+        for k in (
+            "search_title", "tvdb_id", "folder_name", "tvdb_season", "release_season",
+            "poster_url",
+        )
     }
     errors = []
     title = " ".join(form["search_title"].split())
@@ -372,6 +385,7 @@ async def add_show(request: Request):
             tvdb_season=tvdb_season,
             folder_name=folder,
             season_folder=season_folder_name(tv_dir / folder, tvdb_season),
+            poster_url=_poster(form["poster_url"]) if tvdb_id is not None else None,
         )
         session.add(show)
         session.commit()

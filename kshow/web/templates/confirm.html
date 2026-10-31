@@ -7,6 +7,8 @@
 <form class="card" method="post" action="/add">
   <input type="hidden" name="search_title" value="{{ form.search_title }}">
   <input type="hidden" name="tvdb_id" value="{{ form.tvdb_id }}">
+  <input type="hidden" name="poster_url" value="{{ form.poster_url }}">
+  {% if form.poster_url %}<img class="poster" src="{{ form.poster_url }}" alt="" loading="lazy" referrerpolicy="no-referrer">{% endif %}
   {% if english %}<p class="muted">TVDB name: {{ english }}</p>{% endif %}
   {% if not form.tvdb_id %}<p class="muted">Not linked to TVDB: episode dates and “finished” are not tracked.</p>{% endif %}
   <label for="folder_name">Folder name in the TV library</label>

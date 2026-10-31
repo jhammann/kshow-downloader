@@ -2,7 +2,7 @@
 {% if title %}
   {% if tvdb_enabled %}
     {% for card in cards %}
-    <a class="card match" href="/add/confirm?{{ {'tvdb_id': card.m.id, 'title': title, 'season': season} | urlencode }}">
+    <a class="card match" href="/add/confirm?{{ {'tvdb_id': card.m.id, 'title': title, 'season': season, 'poster': card.image or ''} | urlencode }}">
       {% if card.image %}<img class="poster" src="{{ card.image }}" alt="" loading="lazy" referrerpolicy="no-referrer">{% else %}<span class="poster"></span>{% endif %}
       <span class="match-text">
         <span class="names">

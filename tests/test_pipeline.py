@@ -471,3 +471,56 @@ async def test_tvdb_down_still_searches(db, http, tmp_path):
 
     assert add.call_count == 1
     assert episodes(db, show_id)[4].state == "downloading"
+
+
+@respx.mock
+async def test_backfills_missing_poster_from_tvdb(db, http, tmp_path):
+    mock_tvdb(77, [(1, date(2026, 10, 11))])
+    respx.get(f"{TVDB}/series/77").respond(
+        200,
+        json={"data": {"id": 77, "name": TITLE, "image": "https://artworks.thetvdb.com/p.jpg",
+                       "status": {"name": "Continuing"}}},
+    )
+    mock_search()
+    show_id = add_show(db, tvdb_id=77)
+
+    await check_show(make_deps(db, http, tmp_path, tvdb=True), show_id)
+
+    with db() as s:
+        assert s.get(Show, show_id).poster_url == "https://artworks.thetvdb.com/p.jpg"
+
+
+@respx.mock
+async def test_poster_backfill_keeps_existing_and_ignores_errors(db, http, tmp_path):
+    mock_tvdb(77, [(1, date(2026, 10, 11))])
+    series = respx.get(f"{TVDB}/series/77").respond(500)
+    mock_search()
+    show_id = add_show(db, tvdb_id=77)
+    deps = make_deps(db, http, tmp_path, tvdb=True)
+
+    await check_show(deps, show_id)  # TvdbError is ignored
+    with db() as s:
+        assert s.get(Show, show_id).poster_url is None
+        s.get(Show, show_id).poster_url = "https://artworks.thetvdb.com/old.jpg"
+        s.commit()
+    calls = series.call_count
+
+    await check_show(deps, show_id)  # already has one: no lookup
+    assert series.call_count == calls
+    with db() as s:
+        assert s.get(Show, show_id).poster_url == "https://artworks.thetvdb.com/old.jpg"
+
+
+@respx.mock
+async def test_poster_backfill_rejects_non_https(db, http, tmp_path):
+    mock_tvdb(77, [(1, date(2026, 10, 11))])
+    respx.get(f"{TVDB}/series/77").respond(
+        200, json={"data": {"id": 77, "name": TITLE, "image": "http://x/p.jpg"}}
+    )
+    mock_search()
+    show_id = add_show(db, tvdb_id=77)
+
+    await check_show(make_deps(db, http, tmp_path, tvdb=True), show_id)
+
+    with db() as s:
+        assert s.get(Show, show_id).poster_url is None
