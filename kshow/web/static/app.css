@@ -62,9 +62,11 @@ code {
 .logo {
   font-weight: 800; font-size: 1.3rem; letter-spacing: -0.03em;
   color: var(--text); text-decoration: none; margin: 0;
+  /* "k" and <b>show</b> are separate flex items; never let them shrink or wrap apart */
   display: inline-flex; align-items: center; min-height: 44px;
+  white-space: nowrap; flex-shrink: 0;
 }
-.logo b { color: var(--accent); font-weight: 800; }
+.logo b { color: var(--accent); font-weight: 800; white-space: nowrap; }
 .top nav { display: flex; align-items: center; gap: 4px; }
 .nav-link {
   display: inline-flex; align-items: center; min-height: 44px; padding: 0 10px;
