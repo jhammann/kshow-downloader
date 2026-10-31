@@ -3,26 +3,37 @@ services:
     image: registry.hammann.dev/kshow-downloader:latest
     container_name: kshow
     restart: unless-stopped
-    ports:
-      - "8080:8080"
+    # Optional: only needed to open the app directly on the LAN. Through nginx proxy manager,
+    # point the proxy host at kshow:8080 on the shared npm_default network instead.
+    # ports:
+    #   - "8080:8080"
     environment:
       PUID: "1001"
       PGID: "100"
       TZ: Europe/Amsterdam
       APP_URL: https://kshow.example.com
+      # qBittorrent runs in gluetun's network, so reach it via the port published on the host
       QBIT_URL: http://<host>:8089
       QBIT_USERNAME: admin
       QBIT_PASSWORD: changeme
       TVDB_API_KEY: your-tvdb-api-key
-      FLARESOLVERR_URL: http://<host>:8191
+      # FlareSolverr and apprise-api share the npm_default network, so use their container names
+      FLARESOLVERR_URL: http://flaresolverr:8191
+      APPRISE_URL: http://apprise-api:8000/notify/kshow
+      # Leave APPRISE_TAG unset unless the channels stored under the kshow key are tagged
+      # APPRISE_TAG: kshow
       # Pocket ID (omit OIDC_ISSUER to run without login, LAN only)
       OIDC_ISSUER: https://id.example.com
       OIDC_CLIENT_ID: kshow
       OIDC_CLIENT_SECRET: changeme
       OIDC_ALLOWED_GROUPS: kshow
-      # APPRISE_URL: http://<host>:8000/notify/kshow
-      # APPRISE_TAG: kshow
     volumes:
       - /nas/Config/kshow:/config
       - /nas/Media/TV:/tv
       - /nas/Downloads:/downloads
+    networks:
+      - npm_default
+
+networks:
+  npm_default:
+    external: true

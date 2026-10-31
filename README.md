@@ -40,8 +40,8 @@ multi-arch (amd64 and arm64) and exposes port 8080; `/healthz` is the health che
 | `TVDB_API_KEY` | TVDB v4 API key, used to look up shows and episodes. |
 | `TVDB_PIN` | TVDB subscriber PIN, if your key needs one. |
 | `FLARESOLVERR_URL` | FlareSolverr URL, for example `http://<host>:8191`, used when the site sits behind a Cloudflare challenge. |
-| `APPRISE_URL` | Apprise API notify endpoint for notifications. |
-| `APPRISE_TAG` | Apprise tag to notify. |
+| `APPRISE_URL` | Apprise API notify endpoint, for example `http://apprise-api:8000/notify/kshow`. See [Notifications](#notifications-apprise). |
+| `APPRISE_TAG` | Only notify the channels with this tag. Leave unset unless your channels are tagged. |
 | `OIDC_ISSUER` | Pocket ID base URL. Setting it turns authentication on; leave it unset to run without login (LAN only). |
 | `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | The OIDC client from Pocket ID. |
 | `OIDC_ALLOWED_GROUPS` | Comma-separated Pocket ID groups allowed to log in. |
@@ -64,6 +64,42 @@ container (this does not apply if you set `SESSION_SECRET` yourself; change it i
 
 Behind a reverse proxy: when `APP_URL` starts with `https`, the session cookie is `Secure`, so
 opening the app over plain `http` on the LAN will not keep a session. Use the https URL.
+
+## Networking
+
+The example joins the existing `npm_default` network (the one nginx proxy manager uses), so:
+
+- nginx proxy manager reaches the app as `kshow:8080`. Point your proxy host there; publishing
+  port 8080 on the host is then optional.
+- FlareSolverr and apprise-api are reached by container name (`flaresolverr:8191`,
+  `apprise-api:8000`), because they are on the same network.
+- qBittorrent runs inside gluetun's network, which kshow can't join, so it is reached through
+  the port gluetun publishes on the host: `http://<host>:8089`.
+
+## Notifications (Apprise)
+
+kshow posts each notification to `APPRISE_URL`. With apprise-api's stateful endpoint
+(`/notify/<key>`), the actual channels (Telegram, e-mail, …) are stored in apprise-api under that
+key, not in kshow. To set up the `kshow` key with a Telegram channel, run on the Docker host:
+
+```sh
+docker exec apprise-api wget -qO- --post-data 'urls=tgram://BOT_TOKEN/CHAT_ID' \
+  http://127.0.0.1:8000/add/kshow
+```
+
+Send a test message:
+
+```sh
+docker exec apprise-api wget -qO- --header 'Content-Type: application/json' \
+  --post-data '{"title":"test","body":"hello from kshow"}' http://127.0.0.1:8000/notify/kshow
+```
+
+Leave `APPRISE_TAG` unset unless you store the channel with a tag (`urls=kshow=tgram://…`).
+With a tag set, apprise-api only notifies channels carrying that tag, so an untagged channel
+gets nothing.
+
+kshow notifies when an episode is added to the library, a download fails, an episode is overdue,
+and a source becomes unreachable.
 
 ## Leaving `OIDC_ISSUER` unset
 
