@@ -1,0 +1,11 @@
+{% macro poster(image, placeholder, extra_class="") -%}
+{% if image -%}
+<img class="poster {{ extra_class }}" src="{{ image }}" alt="" loading="lazy" referrerpolicy="no-referrer">
+{%- else -%}
+<span class="poster placeholder{% if extra_class %} {{ extra_class }}{% endif %}" style="background: {{ placeholder.gradient }}" aria-hidden="true"><span>{{ placeholder.initials }}</span></span>
+{%- endif %}
+{%- endmacro %}
+
+{% macro pill(status) -%}
+<span class="pill pill-{{ status.kind }}">{{ status.label }}</span>
+{%- endmacro %}

@@ -2,38 +2,44 @@
 {% block title %}Settings{% endblock %}
 {% block content %}
 <h1>Settings</h1>
-{% for e in errors %}<p class="banner" role="alert">{{ e }}</p>{% endfor %}
-<form class="card" method="post" action="/settings">
-  <label for="check_interval_minutes">Check every (minutes)</label>
-  <input id="check_interval_minutes" name="check_interval_minutes" type="number" inputmode="numeric" min="5" max="1440" value="{{ values.check_interval_minutes }}" required>
-  <label for="preferred_resolution">Preferred resolution</label>
-  <select id="preferred_resolution" name="preferred_resolution">
-    {% for r in resolutions %}<option value="{{ r }}"{% if r == values.preferred_resolution %} selected{% endif %}>{{ r }}</option>{% endfor %}
-  </select>
-  <label for="stall_hours">Give up on a stalled download after (hours)</label>
-  <input id="stall_hours" name="stall_hours" type="number" inputmode="decimal" min="1" max="168" step="any" value="{{ values.stall_hours }}" required>
-  <label for="qbit_category">qBittorrent category</label>
-  <input id="qbit_category" name="qbit_category" type="text" value="{{ values.qbit_category }}" required pattern="[A-Za-z0-9_\-]+">
-  <label for="qbit_save_path">qBittorrent save path</label>
-  <input id="qbit_save_path" name="qbit_save_path" type="text" value="{{ values.qbit_save_path }}" required>
-  <label for="path_map">Path map (qBittorrent path=our path, optional)</label>
-  <input id="path_map" name="path_map" type="text" value="{{ values.path_map }}" placeholder="/data/downloads=/downloads">
-  <button class="primary" type="submit">Save settings</button>
+{% for e in errors %}<p class="card alert" role="alert">{{ e }}</p>{% endfor %}
+<form method="post" action="/settings">
+  <section class="card form">
+    <h2 class="card-heading">General</h2>
+    <label for="check_interval_minutes">Check every (minutes)</label>
+    <input id="check_interval_minutes" name="check_interval_minutes" type="number" inputmode="numeric" min="5" max="1440" value="{{ values.check_interval_minutes }}" required>
+    <label for="preferred_resolution">Preferred resolution</label>
+    <select id="preferred_resolution" name="preferred_resolution">
+      {% for r in resolutions %}<option value="{{ r }}"{% if r == values.preferred_resolution %} selected{% endif %}>{{ r }}</option>{% endfor %}
+    </select>
+    <label for="stall_hours">Give up on a stalled download after (hours)</label>
+    <input id="stall_hours" name="stall_hours" type="number" inputmode="decimal" min="1" max="168" step="any" value="{{ values.stall_hours }}" required>
+  </section>
+  <section class="card form">
+    <h2 class="card-heading">qBittorrent</h2>
+    <label for="qbit_category">Category</label>
+    <input id="qbit_category" name="qbit_category" type="text" value="{{ values.qbit_category }}" required pattern="[A-Za-z0-9_\-]+">
+    <label for="qbit_save_path">Save path</label>
+    <input id="qbit_save_path" name="qbit_save_path" type="text" value="{{ values.qbit_save_path }}" required>
+    <label for="path_map">Path map (qBittorrent path=our path, optional)</label>
+    <input id="path_map" name="path_map" type="text" value="{{ values.path_map }}" placeholder="/data/downloads=/downloads">
+  </section>
+  <button class="primary block big" type="submit">Save settings</button>
 </form>
 
-<h2>Sources</h2>
+<h2 class="section-title">Sources</h2>
 {% for s in sources %}
-<form class="card" method="post" action="/settings/sources/{{ s.id }}">
-  <div class="episode-head">
-    <span class="card-title">{{ s.name }}</span>
-    {% if s.unreachable_since %}<span class="badge state-failed">unreachable since {{ s.unreachable_since | localtime }}</span>{% endif %}
+<form class="card form" method="post" action="/settings/sources/{{ s.id }}">
+  <div class="card-head">
+    <h3 class="card-heading">{{ s.name }}</h3>
+    {% if s.unreachable_since %}<span class="pill pill-late">unreachable since {{ s.unreachable_since | localtime }}</span>{% endif %}
   </div>
   {% include "_source_fields.html" %}
   <button type="submit">Save source</button>
 </form>
 {% endfor %}
-<form class="card" method="post" action="/settings/sources">
-  <span class="card-title">Add a source</span>
+<form class="card form" method="post" action="/settings/sources">
+  <h3 class="card-heading">Add a source</h3>
   <label for="new-name">Name</label>
   <input id="new-name" name="name" type="text" required pattern="[A-Za-z0-9_\-]+">
   {% with s = none %}{% include "_source_fields.html" %}{% endwith %}

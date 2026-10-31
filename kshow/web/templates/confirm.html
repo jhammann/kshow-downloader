@@ -1,21 +1,31 @@
 {% extends "base.html" %}
+{% from "_macros.html" import poster %}
 {% block title %}Confirm{% endblock %}
 {% block content %}
-<h1>Add {{ form.search_title }}</h1>
-{% for e in errors %}<p class="banner" role="alert">{{ e }}</p>{% endfor %}
-{% for n in notes %}<p class="banner" role="status">{{ n }}</p>{% endfor %}
-<form class="card" method="post" action="/add">
+<section class="hero">
+  <span class="art hero-art">{{ poster(form.poster_url, placeholder) }}</span>
+  <div class="hero-text">
+    <p class="eyebrow">Add this show</p>
+    <h1>{{ english or form.search_title }}</h1>
+    {% if english %}<p class="hero-ko" lang="ko">{{ form.search_title }}</p>{% endif %}
+    <p class="muted">Season {{ form.tvdb_season }}</p>
+  </div>
+</section>
+{% for e in errors %}<p class="card alert" role="alert">{{ e }}</p>{% endfor %}
+{% for n in notes %}<p class="card note" role="status">{{ n }}</p>{% endfor %}
+<form class="card form" method="post" action="/add">
   <input type="hidden" name="search_title" value="{{ form.search_title }}">
   <input type="hidden" name="tvdb_id" value="{{ form.tvdb_id }}">
   <input type="hidden" name="poster_url" value="{{ form.poster_url }}">
-  {% if form.poster_url %}<img class="poster" src="{{ form.poster_url }}" alt="" loading="lazy" referrerpolicy="no-referrer">{% endif %}
-  {% if english %}<p class="muted">TVDB name: {{ english }}</p>{% endif %}
   {% if not form.tvdb_id %}<p class="muted">Not linked to TVDB: episode dates and “finished” are not tracked.</p>{% endif %}
   <label for="folder_name">Folder name in the TV library</label>
   <input id="folder_name" name="folder_name" value="{{ form.folder_name }}" type="text" required maxlength="120">
   {% if target %}
-  <p class="muted">Episodes go to <code>{{ target }}</code></p>
-  {% if existing %}<p class="muted">Existing folder — new episodes go here.</p>{% endif %}
+  <div class="target">
+    <span class="muted">Episodes go to</span>
+    <code>{{ target }}</code>
+    {% if existing %}<span class="ok-text">Existing folder — new episodes go here.</span>{% endif %}
+  </div>
   {% endif %}
   <div class="row">
     <div>
@@ -27,7 +37,7 @@
       <input id="release_season" name="release_season" value="{{ form.release_season }}" type="number" inputmode="numeric" min="1" max="99" required>
     </div>
   </div>
-  <p class="muted">Release season is the number after the title in torrent names (none means 1).</p>
-  <button class="primary" type="submit">Follow this show</button>
+  <p class="muted hint">Release season is the number after the title in torrent names (none means 1).</p>
+  <button class="primary big" type="submit">Follow this show</button>
 </form>
 {% endblock %}

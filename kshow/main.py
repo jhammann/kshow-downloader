@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
 from kshow import auth
@@ -73,6 +74,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.oauth = auth.build_oauth(settings) if settings.auth_enabled else None
     app.add_exception_handler(auth.LoginRequired, auth.login_required_handler)
+    app.add_exception_handler(StarletteHTTPException, web_routes.http_error_handler)
     app.add_middleware(
         SessionMiddleware,
         secret_key=session_secret,

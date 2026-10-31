@@ -10,7 +10,13 @@ from kshow.config import Settings
 from kshow.db import Episode, Grab, Show, SourceRow, get_setting, utcnow
 from kshow.main import create_app
 from kshow.web import routes
-from kshow.web.routes import ShowStatus, sanitize_folder, show_status, status_line
+from kshow.web.routes import (
+    ShowStatus,
+    placeholder_poster,
+    sanitize_folder,
+    show_status,
+    status_line,
+)
 
 TVDB = "https://api4.thetvdb.com/v4"
 
@@ -171,6 +177,47 @@ def test_show_list_orders_and_banners(client):
     assert "torrenttip" in body and "unreachable" in body
     assert "/static/htmx.min.js" in body and "unpkg" not in body
     assert client.get("/static/app.css").status_code == 200
+
+
+def test_placeholder_poster_is_deterministic():
+    a = placeholder_poster(3, "The Wonder Coach")
+    assert a == placeholder_poster(3, "The Wonder Coach")
+    assert a.initials == "TW"
+    assert a.gradient.startswith("linear-gradient(")
+    assert placeholder_poster(4, "The Wonder Coach").gradient != a.gradient
+    assert placeholder_poster(1, "놀면 뭐하니").initials == "놀뭐"
+    assert placeholder_poster(1, "moving").initials == "M"
+    assert placeholder_poster(1, "  ").initials == "?"
+
+
+def test_show_list_posters_and_sections(client):
+    poster = "https://artworks.thetvdb.com/banners/p.jpg"
+    _add_show(client, folder_name="With Poster", poster_url=poster)
+    _add_show(client, folder_name="Night Market", status="finished")
+    body = client.get("/").text
+    assert f'src="{poster}"' in body
+    assert 'loading="lazy"' in body and 'referrerpolicy="no-referrer"' in body
+    # a show without a poster gets a generated one with its initials
+    assert 'class="poster placeholder"' in body and ">NM<" in body
+    assert ">Following<" in body and ">Finished<" in body and ">Stopped<" not in body
+    assert "신인감독 김연경 · S2" in body
+    assert 'class="pill pill-waiting"' in body
+
+
+def test_show_list_progress_bar_and_empty_state(client):
+    r = client.get("/")
+    assert "Add your first show" in r.text and 'href="/add"' in r.text
+    show_id = _add_show(client)
+    with _session(client) as s:
+        ep = Episode(show_id=show_id, number=4, state="downloading")
+        s.add(ep)
+        s.flush()
+        s.add(Grab(episode_id=ep.id, post_url="u", release_name="r", qbit_tag="t",
+                   state="downloading", progress=0.42))
+        s.commit()
+    body = client.get("/shows/_list").text
+    assert 'class="pill pill-downloading"' in body and "E04 · 42%" in body
+    assert 'style="width: 42%"' in body
 
 
 def test_list_partial_has_its_own_url(client):
@@ -592,6 +639,18 @@ def test_search_and_retry(client, triggered):
     assert client.get("/shows/999").status_code == 404
     assert client.post("/shows/999/stop").status_code == 404
     assert client.post(f"/shows/{show_id}/episodes/77/retry").status_code == 404
+
+
+def test_browser_errors_render_the_card_page(client):
+    html = {"Accept": "text/html,application/xhtml+xml"}
+    r = client.get("/shows/999", headers=html)
+    assert r.status_code == 404
+    assert "/static/app.css" in r.text and "Not found" in r.text
+    r = client.post("/shows/1/stop", headers={**html, "Origin": "https://evil.example"})
+    assert r.status_code == 403 and "/static/app.css" in r.text
+    assert "evil.example" not in r.text
+    # API-style callers keep the JSON body
+    assert client.get("/shows/999").json() == {"detail": "Show not found"}
 
 
 # --- settings -------------------------------------------------------------------

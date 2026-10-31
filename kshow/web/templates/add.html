@@ -2,11 +2,13 @@
 {% block title %}Add a show{% endblock %}
 {% block content %}
 <h1>Add a show</h1>
-<form class="card" hx-post="/add/search" hx-target="#results" hx-indicator="#searching">
+<form class="search" hx-post="/add/search" hx-target="#results" hx-indicator="#searching">
   <label for="query">Korean name, with the season number if it is not the first</label>
-  <input id="query" name="query" type="text" required autofocus autocomplete="off"
-         placeholder="신인감독 김연경 2">
-  <button class="primary" type="submit">Search</button>
+  <div class="search-row">
+    <input id="query" name="query" type="text" required autofocus autocomplete="off" enterkeyhint="search"
+           placeholder="신인감독 김연경 2" lang="ko">
+    <button class="primary" type="submit">Search</button>
+  </div>
   <p id="searching" class="muted htmx-indicator">Searching…</p>
 </form>
 <div id="results"></div>

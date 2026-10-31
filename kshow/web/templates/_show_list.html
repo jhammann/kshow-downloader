@@ -1,17 +1,35 @@
+{% from "_macros.html" import poster, pill %}
 <div id="show-list" hx-get="/shows/_list" hx-trigger="every 30s" hx-swap="outerHTML">
   {% for source in down %}
-  <p class="banner" role="alert">
-    Source <strong>{{ source.name }}</strong> has been unreachable since {{ source.unreachable_since | localtime }}.
-    Check its address in <a href="/settings">Settings</a>.
+  <p class="card alert" role="alert">
+    <span>Source <strong>{{ source.name }}</strong> has been unreachable since {{ source.unreachable_since | localtime }}.
+    Check its address in <a href="/settings">Settings</a>.</span>
   </p>
   {% endfor %}
-  {% for card in cards %}
-  <a class="card show-card status-{{ card.show.status }}" href="/shows/{{ card.show.id }}">
-    <span class="card-title">{{ card.show.folder_name }}</span>
-    <span class="muted">{{ card.show.search_title }} · Season {{ card.show.tvdb_season }}</span>
-    <span class="status">{{ card.status }}</span>
-  </a>
+  {% for title, items in sections %}
+  <section class="shelf shelf-{{ items[0].show.status }}">
+    <h2 class="section-title">{{ title }}</h2>
+    <ul class="grid">
+      {% for card in items %}
+      <li>
+        <a class="tile" href="/shows/{{ card.show.id }}">
+          <span class="art">
+            {{ poster(card.poster, card.placeholder) }}
+            {{ pill(card.status) }}
+            {% if card.status.kind == "downloading" %}<span class="bar" role="progressbar" aria-label="Download progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ (card.status.progress * 100) | int }}"><i style="width: {{ (card.status.progress * 100) | int }}%"></i></span>{% endif %}
+          </span>
+          <span class="tile-title">{{ card.show.folder_name }}</span>
+          <span class="tile-sub" lang="ko">{{ card.show.search_title }} · S{{ card.show.tvdb_season }}</span>
+        </a>
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
   {% else %}
-  <p class="empty">No shows yet.</p>
+  <div class="card empty-card">
+    <p class="empty-title">No shows yet</p>
+    <p class="muted">Add a Korean show and new episodes will appear in Plex by themselves.</p>
+    <a class="button primary big" href="/add">Add your first show</a>
+  </div>
   {% endfor %}
 </div>

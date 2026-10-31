@@ -11,7 +11,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import HTMLResponse, RedirectResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -212,7 +214,54 @@ def _redirect(url: str) -> RedirectResponse:
     return RedirectResponse(url, status_code=303)
 
 
+_ERROR_PAGES = {
+    400: ("Something is not right", "The request could not be handled. Go back and try again."),
+    403: ("Not allowed", "That action was blocked. Open kshow again and retry from there."),
+    404: ("Not found", "That page or show does not exist (any more)."),
+}
+
+
+async def http_error_handler(request: Request, exc: StarletteHTTPException):
+    """Card-style pages for browsers; the default JSON body for everything else."""
+    wants_html = "text/html" in request.headers.get("accept", "")
+    is_htmx = request.headers.get("hx-request") == "true"
+    if wants_html and not is_htmx and exc.status_code in _ERROR_PAGES:
+        title, message = _ERROR_PAGES[exc.status_code]
+        return _render(
+            request, "error.html", status_code=exc.status_code, title=title, message=message
+        )
+    return await http_exception_handler(request, exc)
+
+
 # --- show list --------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Placeholder:
+    gradient: str
+    initials: str
+
+
+_PLACEHOLDER_GRADIENTS = (
+    ("#f7b267", "#f25f5c"),
+    ("#70a1d7", "#3c4f76"),
+    ("#a1c181", "#2e6f40"),
+    ("#d4a5ff", "#6a4c93"),
+    ("#f4a6a6", "#8c3b5a"),
+    ("#7fd1c7", "#2a6370"),
+    ("#e9c46a", "#8a5a1f"),
+    ("#9fb4ff", "#4b3f8f"),
+)
+
+
+def placeholder_poster(show_id: int, name: str) -> Placeholder:
+    """A generated poster for a show without artwork: a gradient picked by id, plus initials."""
+    start, end = _PLACEHOLDER_GRADIENTS[show_id % len(_PLACEHOLDER_GRADIENTS)]
+    initials = "".join(word[0] for word in name.split()[:2]).upper() or "?"
+    return Placeholder(f"linear-gradient(135deg, {start}, {end})", initials)
+
+
+_SECTIONS = (("following", "Following"), ("finished", "Finished"), ("stopped", "Stopped"))
 
 
 def _show_cards(request: Request) -> dict:
@@ -227,11 +276,28 @@ def _show_cards(request: Request) -> dict:
             grabs = session.scalars(
                 select(Grab).where(Grab.episode_id.in_([e.id for e in episodes]))
             ).all()
-            cards.append({"show": show, "status": status_line(show, episodes, grabs)})
+            cards.append(_card(show, show_status(show, episodes, grabs)))
         down = session.scalars(
             select(SourceRow).where(SourceRow.unreachable_since.is_not(None))
         ).all()
-    return {"cards": cards, "down": down}
+    sections = [
+        (title, [c for c in cards if c["show"].status == key]) for key, title in _SECTIONS
+    ]
+    return {
+        "cards": cards,
+        "sections": [(title, items) for title, items in sections if items],
+        "down": down,
+    }
+
+
+def _card(show: Show, status: ShowStatus | None = None) -> dict:
+    poster = safe_image_url(show.poster_url)
+    return {
+        "show": show,
+        "status": status,
+        "poster": poster,
+        "placeholder": None if poster else placeholder_poster(show.id, show.folder_name),
+    }
 
 
 _NO_STORE = {"Cache-Control": "no-store"}
@@ -284,7 +350,12 @@ async def add_search(request: Request):
             log.warning("TVDB search failed: %s", e)
             error = "TVDB could not be reached. Try again, or add without TVDB."
     cards = [
-        {"m": m, "image": safe_image_url(m.image_url)} for m in matches
+        {
+            "m": m,
+            "image": safe_image_url(m.image_url),
+            "placeholder": placeholder_poster(m.id, m.english_name or m.name),
+        }
+        for m in matches
     ]
     return _render(
         request,
@@ -367,6 +438,10 @@ def _render_confirm(
         notes=notes or [],
         target=target,
         existing=existing,
+        placeholder=placeholder_poster(
+            int(form["tvdb_id"]) if form["tvdb_id"].isdigit() else 0,
+            english or form["search_title"],
+        ),
     )
 
 
@@ -458,6 +533,7 @@ async def show_detail(request: Request, show_id: int):
         show=show,
         rows=rows,
         status=status_line(show, episodes, grabs),
+        card=_card(show, show_status(show, episodes, grabs)),
     )
 
 
