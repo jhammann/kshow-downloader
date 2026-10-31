@@ -1,0 +1,48 @@
+when:
+  event: [tag, manual]
+  ref: refs/tags/v*
+
+steps:
+  build-and-push:
+    image: woodpeckerci/plugin-docker-buildx
+    privileged: true
+    settings:
+      registry: registry.hammann.dev
+      repo: registry.hammann.dev/kshow-downloader
+      username:
+        from_secret: registry_username
+      password:
+        from_secret: registry_password
+      tags:
+        - latest
+        - ${CI_COMMIT_TAG}
+      dockerfile: Dockerfile
+      platforms: linux/arm64
+
+  # This step cleans up old images in the registry, keeping only the 5 most recent tags (excluding 'latest')
+  # Please note that this won't actually delete images, just the tags pointing to them.
+  # To fully delete images, additional registry garbage collection is needed. On the [code]capi dev server this is done every night.
+  cleanup-old-images:
+    image: alpine:latest
+    environment:
+      REGISTRY_USERNAME:
+        from_secret: registry_username
+      REGISTRY_PASSWORD:
+        from_secret: registry_password
+    commands:
+      - |
+        apk add --no-cache curl
+        curl -L https://github.com/regclient/regclient/releases/latest/download/regctl-linux-arm64 -o /usr/local/bin/regctl
+        chmod +x /usr/local/bin/regctl
+
+        printf '%s\n' "$REGISTRY_PASSWORD" | regctl registry login registry.hammann.dev -u "$REGISTRY_USERNAME" --pass-stdin
+
+        # List all tags except 'latest', sort in reverse order, skip first 5, and delete the rest
+        regctl tag ls registry.hammann.dev/kshow-downloader | \
+          grep -v '^latest$' | \
+          sort -rV | \
+          tail -n +6 | \
+          while read tag; do
+            echo "Deleting tag: $tag"
+            regctl tag delete registry.hammann.dev/kshow-downloader:$tag || true
+          done

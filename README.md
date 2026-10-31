@@ -11,8 +11,10 @@ notifications. State lives in a SQLite database in `/config`.
 Copy `docker-compose.example.yml`, adjust it, and start it:
 
 ```sh
-docker compose -f docker-compose.example.yml up -d --build
+docker compose -f docker-compose.example.yml up -d
 ```
+
+The image comes from `registry.hammann.dev/kshow-downloader`. Releases are automatic: every push to `master` runs semantic-release (GitHub Actions), which tags `vX.Y.Z` from the commit messages (`feat:` → minor, `fix:`/`ci:` → patch). Woodpecker builds the `linux/arm64` image for each `v*` tag, pushes it as `latest` and the version tag, and keeps the 5 most recent version tags. To build locally instead, add `build: .` under the service.
 
 The example matches this layout:
 

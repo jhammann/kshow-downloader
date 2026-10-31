@@ -1,7 +1,6 @@
 services:
   kshow:
-    image: kshow-downloader:latest
-    build: .
+    image: registry.hammann.dev/kshow-downloader:latest
     container_name: kshow
     restart: unless-stopped
     ports:
