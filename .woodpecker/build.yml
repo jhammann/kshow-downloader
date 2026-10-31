@@ -23,7 +23,7 @@ steps:
   # Please note that this won't actually delete images, just the tags pointing to them.
   # To fully delete images, additional registry garbage collection is needed. On the [code]capi dev server this is done every night.
   cleanup-old-images:
-    image: alpine:latest
+    image: alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f
     environment:
       REGISTRY_USERNAME:
         from_secret: registry_username
@@ -32,7 +32,9 @@ steps:
     commands:
       - |
         apk add --no-cache curl
-        curl -L https://github.com/regclient/regclient/releases/latest/download/regctl-linux-arm64 -o /usr/local/bin/regctl
+        # Pinned regctl release, verified by checksum before it sees the registry credentials
+        curl -fsSL https://github.com/regclient/regclient/releases/download/v0.11.7/regctl-linux-arm64 -o /usr/local/bin/regctl
+        echo "9f349bab5c407ac04f3dabf99c7c7a6b0f9e9723c23f2775380e804d02c6dbb9  /usr/local/bin/regctl" | sha256sum -c -
         chmod +x /usr/local/bin/regctl
 
         printf '%s\n' "$REGISTRY_PASSWORD" | regctl registry login registry.hammann.dev -u "$REGISTRY_USERNAME" --pass-stdin
