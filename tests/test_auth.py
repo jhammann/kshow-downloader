@@ -221,7 +221,7 @@ def test_login_page_names_the_provider_and_uses_the_stylesheet(tmp_path):
         assert r.status_code == 200
         assert "Log in with Pocket ID" in r.text
         assert 'href="/auth/start"' in r.text
-        assert '<link rel="stylesheet" href="/static/app.css">' in r.text
+        assert '<link rel="stylesheet" href="/static/app.css?v=' in r.text
         assert "Only invited accounts can sign in" in r.text
         # no app chrome on the login page
         assert "<nav>" not in r.text and "/logout" not in r.text

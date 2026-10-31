@@ -847,3 +847,17 @@ def test_htmx_request_gets_hx_redirect_when_logged_out(settings):
         assert c.get("/").status_code == 303
         assert c.post("/add", data={}).status_code == 401
         assert c.get("/settings").status_code == 303
+
+
+def test_static_assets_are_versioned_by_content(client):
+    """A new release must never pair new HTML with a stylesheet cached from the old one."""
+    import hashlib
+    import re
+
+    from kshow.web.templating import STATIC_DIR
+
+    page = client.get("/").text
+    for name in ("app.css", "htmx.min.js"):
+        digest = hashlib.sha256((STATIC_DIR / name).read_bytes()).hexdigest()[:12]
+        assert f"/static/{name}?v={digest}" in page
+    assert not re.search(r'"/static/[^"?]+"', page)
