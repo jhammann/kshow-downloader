@@ -1,6 +1,7 @@
 from datetime import date, datetime, timezone
 
-from sqlalchemy import ForeignKey, UniqueConstraint, create_engine, select
+from sqlalchemy import ForeignKey, UniqueConstraint, create_engine, inspect, select, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
@@ -32,6 +33,7 @@ class Show(Base):
     season_folder: Mapped[str]
     status: Mapped[str] = mapped_column(default="following")  # following | finished | stopped
     season_first_aired: Mapped[date | None]
+    poster_url: Mapped[str | None]  # https:// TVDB artwork, or None for a placeholder
     added_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
@@ -111,12 +113,39 @@ def set_setting(session: Session, key: str, value: str) -> None:
     session.commit()
 
 
+def add_missing_columns(engine: Engine) -> None:
+    """Add nullable model columns that an existing table lacks.
+
+    create_all creates missing tables but never alters existing ones, so a column added to a
+    model later would be missing from a deployed database. Only nullable columns are added:
+    existing rows get NULL, which keeps their data valid. Safe to run on every start.
+    """
+    insp = inspect(engine)
+    preparer = engine.dialect.identifier_preparer
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if not insp.has_table(table.name):
+                continue
+            existing = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in existing or not col.nullable:
+                    continue
+                ddl = col.type.compile(dialect=engine.dialect)
+                conn.execute(
+                    text(
+                        f"ALTER TABLE {preparer.quote(table.name)} "
+                        f"ADD COLUMN {preparer.quote(col.name)} {ddl}"
+                    )
+                )
+
+
 def init_db(url: str) -> sessionmaker:
     kwargs = {}
     if url in ("sqlite://", "sqlite:///:memory:"):
         kwargs = {"poolclass": StaticPool, "connect_args": {"check_same_thread": False}}
     engine = create_engine(url, **kwargs)
     Base.metadata.create_all(engine)
+    add_missing_columns(engine)
     factory = sessionmaker(engine, expire_on_commit=False)
     with factory() as s:
         for key, value in DEFAULT_SETTINGS.items():

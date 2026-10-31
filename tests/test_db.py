@@ -101,3 +101,48 @@ def test_grab_ids_are_never_reused():
         s.add(second)
         s.commit()
         assert second.id > first_id
+
+
+_OLD_SHOWS_DDL = """
+CREATE TABLE shows (
+    id INTEGER NOT NULL PRIMARY KEY,
+    search_title VARCHAR NOT NULL,
+    release_season INTEGER NOT NULL,
+    tvdb_id INTEGER,
+    tvdb_season INTEGER NOT NULL,
+    folder_name VARCHAR NOT NULL,
+    season_folder VARCHAR NOT NULL,
+    status VARCHAR NOT NULL,
+    season_first_aired DATE,
+    added_at DATETIME NOT NULL
+)
+"""
+
+
+def test_init_db_adds_missing_nullable_columns_to_old_db(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    con.execute(_OLD_SHOWS_DDL)
+    con.execute(
+        "INSERT INTO shows VALUES (1, '놀면 뭐하니', 1, 5, 1, 'Hangout', 'Season 01',"
+        " 'following', NULL, '2026-10-01 10:00:00')"
+    )
+    con.commit()
+    con.close()
+
+    url = f"sqlite:///{path}"
+    init_db(url)
+    Session = init_db(url)  # idempotent: the second run finds nothing to add
+
+    with Session() as s:
+        show = s.get(Show, 1)
+        assert show.folder_name == "Hangout" and show.tvdb_id == 5
+        assert show.poster_url is None
+        show.poster_url = "https://artworks.thetvdb.com/p.jpg"
+        s.commit()
+    con = sqlite3.connect(path)
+    cols = [row[1] for row in con.execute("PRAGMA table_info(shows)")]
+    con.close()
+    assert cols.count("poster_url") == 1
