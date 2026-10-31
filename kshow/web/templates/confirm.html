@@ -3,7 +3,7 @@
 {% block title %}Confirm{% endblock %}
 {% block content %}
 <section class="hero">
-  <span class="art hero-art">{{ poster(form.poster_url, placeholder) }}</span>
+  <span class="art hero-art">{{ poster(poster_image, placeholder) }}</span>
   <div class="hero-text">
     <p class="eyebrow">Add this show</p>
     <h1>{{ english or form.search_title }}</h1>
@@ -16,7 +16,6 @@
 <form class="card form" method="post" action="/add">
   <input type="hidden" name="search_title" value="{{ form.search_title }}">
   <input type="hidden" name="tvdb_id" value="{{ form.tvdb_id }}">
-  <input type="hidden" name="poster_url" value="{{ form.poster_url }}">
   {% if not form.tvdb_id %}<p class="muted">Not linked to TVDB: episode dates and “finished” are not tracked.</p>{% endif %}
   <label for="folder_name">Folder name in the TV library</label>
   <input id="folder_name" name="folder_name" value="{{ form.folder_name }}" type="text" required maxlength="120">

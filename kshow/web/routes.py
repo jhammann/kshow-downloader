@@ -227,8 +227,17 @@ async def http_error_handler(request: Request, exc: StarletteHTTPException):
     is_htmx = request.headers.get("hx-request") == "true"
     if wants_html and not is_htmx and exc.status_code in _ERROR_PAGES:
         title, message = _ERROR_PAGES[exc.status_code]
+        # Someone who is not logged in gets no nav or log-out link.
+        logged_out = request.app.state.settings.auth_enabled and not request.scope.get(
+            "session", {}
+        ).get("user")
         return _render(
-            request, "error.html", status_code=exc.status_code, title=title, message=message
+            request,
+            "error.html",
+            status_code=exc.status_code,
+            title=title,
+            message=message,
+            logged_out=logged_out,
         )
     return await http_exception_handler(request, exc)
 
@@ -261,7 +270,7 @@ def placeholder_poster(show_id: int, name: str) -> Placeholder:
     return Placeholder(f"linear-gradient(135deg, {start}, {end})", initials)
 
 
-_SECTIONS = (("following", "Following"), ("finished", "Finished"), ("stopped", "Stopped"))
+_SECTIONS = (("following", "Following"), ("stopped", "Stopped"), ("finished", "Finished"))
 
 
 def _show_cards(request: Request) -> dict:
@@ -376,7 +385,6 @@ async def add_confirm(
     title: str,
     season: int = 1,
     tvdb_id: int | None = None,
-    poster: str | None = None,
 ):
     title = title.strip()[:MAX_TITLE_LEN]
     season = season if 1 <= season <= 99 else 1
@@ -387,6 +395,7 @@ async def add_confirm(
             english = await tvdb.english_name(tvdb_id)
         except TvdbError as e:
             log.warning("TVDB english name failed for %s: %s", tvdb_id, e)
+    poster = await _tvdb_poster(request, tvdb_id)
     tv_dir = request.app.state.settings.tv_dir
     folder, changed = None, False
     if english:
@@ -401,10 +410,30 @@ async def add_confirm(
         "folder_name": folder or "",
         "tvdb_season": str(season),
         "release_season": str(season),
-        "poster_url": (safe_image_url(poster) or "") if tvdb_id is not None else "",
     }
     notes = [_SANITISED_NOTE.format(folder)] if changed else []
-    return _render_confirm(request, form, english=english, notes=notes)
+    return _render_confirm(request, form, english=english, notes=notes, poster=poster)
+
+
+async def _tvdb_poster(request: Request, tvdb_id: int | None) -> str | None:
+    """The series artwork, looked up on the server; never taken from the client."""
+    tvdb = request.app.state.deps.tvdb
+    if tvdb_id is None or tvdb is None:
+        return None
+    try:
+        match = await tvdb.lookup(str(tvdb_id))
+    except TvdbError as e:
+        log.info("TVDB poster lookup failed for %s: %s", tvdb_id, e)
+        return None
+    return safe_image_url(match.image_url) if match else None
+
+
+def _parse_tvdb_id(raw: str) -> int | None:
+    """An ASCII decimal TVDB id, else None."""
+    raw = raw.strip()
+    if not (raw.isascii() and raw.isdecimal()):
+        return None
+    return int(raw)
 
 
 def _render_confirm(
@@ -414,9 +443,9 @@ def _render_confirm(
     errors: list[str] | None = None,
     notes: list[str] | None = None,
     status_code: int = 200,
+    poster: str | None = None,
 ) -> HTMLResponse:
     """The confirm page, with the library path the pre-filled values lead to."""
-    form = {**form, "poster_url": safe_image_url(form.get("poster_url")) or ""}
     tv_dir = request.app.state.settings.tv_dir
     folder = form["folder_name"]
     season = _season(form["tvdb_season"])
@@ -438,9 +467,9 @@ def _render_confirm(
         notes=notes or [],
         target=target,
         existing=existing,
+        poster_image=safe_image_url(poster),
         placeholder=placeholder_poster(
-            int(form["tvdb_id"]) if form["tvdb_id"].isdigit() else 0,
-            english or form["search_title"],
+            _parse_tvdb_id(form["tvdb_id"]) or 0, english or form["search_title"]
         ),
     )
 
@@ -450,10 +479,7 @@ async def add_show(request: Request):
     raw = await request.form()
     form = {
         k: str(raw.get(k, ""))
-        for k in (
-            "search_title", "tvdb_id", "folder_name", "tvdb_season", "release_season",
-            "poster_url",
-        )
+        for k in ("search_title", "tvdb_id", "folder_name", "tvdb_season", "release_season")
     }
     errors = []
     title = " ".join(form["search_title"].split())
@@ -461,12 +487,9 @@ async def add_show(request: Request):
         errors.append("The Korean title is missing.")
     tvdb_id = None
     if form["tvdb_id"].strip():
-        try:
-            tvdb_id = int(form["tvdb_id"])
-        except ValueError:
+        tvdb_id = _parse_tvdb_id(form["tvdb_id"])
+        if tvdb_id is None:
             errors.append("Invalid TVDB id.")
-    # Never trust the submitted poster: keep it only when it is TVDB artwork for a TVDB show.
-    form["poster_url"] = (safe_image_url(form["poster_url"]) or "") if tvdb_id is not None else ""
     tv_dir = request.app.state.settings.tv_dir
     folder, changed = choose_folder(tv_dir, form["folder_name"])
     if folder is None:
@@ -493,6 +516,8 @@ async def add_show(request: Request):
                 return _redirect(f"/shows/{dup.id}")
         if errors:
             return _render_confirm(request, form, errors=errors, status_code=400)
+        # The poster comes from TVDB, never from the form; the check backfills it on failure.
+        poster = await _tvdb_poster(request, tvdb_id)
         show = Show(
             search_title=title,
             release_season=release_season,
@@ -500,7 +525,7 @@ async def add_show(request: Request):
             tvdb_season=tvdb_season,
             folder_name=folder,
             season_folder=season_folder_name(tv_dir / folder, tvdb_season),
-            poster_url=form["poster_url"] or None,
+            poster_url=poster,
         )
         session.add(show)
         session.commit()

@@ -19,6 +19,7 @@ from kshow.web.routes import (
 )
 
 TVDB = "https://api4.thetvdb.com/v4"
+POSTER = "https://artworks.thetvdb.com/1.jpg"
 
 
 @pytest.fixture
@@ -173,7 +174,9 @@ def test_show_list_orders_and_banners(client):
     body = r.text
     assert 'hx-trigger="every 30s"' in body
     assert "&lt;b&gt;Live&lt;/b&gt; Show" in body and "<b>Live</b>" not in body
-    assert body.index("Live") < body.index("Done Show") < body.index("Stopped Show")
+    # sections follow the brief: Following, Stopped, Finished
+    assert body.index("Live") < body.index("Stopped Show") < body.index("Done Show")
+    assert body.index(">Following<") < body.index(">Stopped<") < body.index(">Finished<")
     assert "torrenttip" in body and "unreachable" in body
     assert "/static/htmx.min.js" in body and "unpkg" not in body
     assert client.get("/static/app.css").status_code == 200
@@ -264,6 +267,11 @@ def _mock_tvdb():
     respx.get(f"{TVDB}/series/123/translations/eng").mock(
         return_value=httpx.Response(200, json={"data": {"name": "The Wonder Coach"}})
     )
+    respx.get(f"{TVDB}/series/123").mock(
+        return_value=httpx.Response(
+            200, json={"data": {"id": 123, "name": "신인감독 김연경", "image": POSTER}}
+        )
+    )
     return search
 
 
@@ -316,6 +324,7 @@ def test_confirm_sanitises_english_name(client):
     respx.get(f"{TVDB}/series/9/translations/eng").mock(
         return_value=httpx.Response(200, json={"data": {"name": "Who/What: Now?"}})
     )
+    respx.get(f"{TVDB}/series/9").mock(return_value=httpx.Response(404))
     r = client.get("/add/confirm", params={"tvdb_id": 9, "title": "누구", "season": 1})
     assert 'name="folder_name" value="WhoWhat Now"' in r.text
     assert "not allowed in folder names" in r.text
@@ -496,59 +505,99 @@ def test_cross_origin_post_rejected(client, triggered):
 
 # --- posters --------------------------------------------------------------------
 
-POSTER = "https://artworks.thetvdb.com/1.jpg"
 
-
-@respx.mock
-def test_poster_carried_from_search_to_new_show(client):
-    _mock_tvdb()
-    r = client.post("/add/search", data={"query": "신인감독 김연경 2"})
-    assert "poster=https%3A%2F%2Fartworks.thetvdb.com%2F1.jpg" in r.text
-
-    r = client.get(
-        "/add/confirm",
-        params={"tvdb_id": 123, "title": "신인감독 김연경", "season": 2, "poster": POSTER},
+def _mock_series(image, status=200):
+    respx.post(f"{TVDB}/login").mock(
+        return_value=httpx.Response(200, json={"data": {"token": "tok"}})
     )
-    assert f'name="poster_url" value="{POSTER}"' in r.text
-    assert f'src="{POSTER}"' in r.text and 'referrerpolicy="no-referrer"' in r.text
+    respx.get(f"{TVDB}/series/123/translations/eng").mock(
+        return_value=httpx.Response(200, json={"data": {"name": "The Wonder Coach"}})
+    )
+    return respx.get(f"{TVDB}/series/123").mock(
+        return_value=httpx.Response(
+            status, json={"data": {"id": 123, "name": "신인감독 김연경", "image": image}}
+        )
+    )
 
-    r = client.post(
+
+def _post_tvdb_add(client, **extra):
+    return client.post(
         "/add",
         data={"search_title": "신인감독 김연경", "tvdb_id": "123",
               "folder_name": "The Wonder Coach", "tvdb_season": "2",
-              "release_season": "2", "poster_url": POSTER},
+              "release_season": "2", **extra},
     )
-    assert r.status_code == 303
+
+
+@respx.mock
+def test_poster_is_looked_up_on_the_server(client):
+    _mock_series(POSTER)
+    r = client.get("/add/confirm", params={"tvdb_id": 123, "title": "신인감독 김연경", "season": 2})
+    assert f'src="{POSTER}"' in r.text and 'referrerpolicy="no-referrer"' in r.text
+    assert 'name="poster_url"' not in r.text
+
+    assert _post_tvdb_add(client).status_code == 303
     with _session(client) as s:
         assert s.scalar(select(Show)).poster_url == POSTER
 
 
-@pytest.mark.parametrize(
-    "poster,tvdb_id",
-    [
-        ("http://artworks.thetvdb.com/1.jpg", "123"),
-        ("javascript:alert(1)", "123"),
-        ("https://evil.example/x.jpg", "123"),
-        ("https://artworks.thetvdb.com.evil.com/x.jpg", "123"),
-        ("https://user@artworks.thetvdb.com/x.jpg", "123"),
-        ("https://artworks.thetvdb.com:8443/x.jpg", "123"),
-        (POSTER, ""),
-    ],
-)
-def test_poster_must_be_https_and_linked_to_tvdb(client, poster, tvdb_id):
-    params = {"title": "x", "season": 1, "poster": poster}
-    if tvdb_id:
-        params["tvdb_id"] = tvdb_id
-    r = client.get("/add/confirm", params=params)
-    assert poster not in r.text
+@respx.mock
+def test_submitted_poster_is_ignored(client):
+    _mock_series(None)
+    r = client.get(
+        "/add/confirm",
+        params={"tvdb_id": 123, "title": "x", "season": 2, "poster": POSTER},
+    )
+    assert POSTER not in r.text
+    assert _post_tvdb_add(client, poster_url=POSTER).status_code == 303
+    with _session(client) as s:
+        assert s.scalar(select(Show)).poster_url is None
+
+
+@respx.mock
+def test_search_results_do_not_carry_the_poster_to_confirm(client):
+    _mock_tvdb()
+    r = client.post("/add/search", data={"query": "신인감독 김연경 2"})
+    assert f'src="{POSTER}"' in r.text  # shown on the result card
+    assert "poster=" not in r.text
+
+
+@respx.mock
+@pytest.mark.parametrize("image", ["https://evil.example/x.jpg", "http://artworks.thetvdb.com/x.jpg"])
+def test_server_poster_lookup_rejects_unsafe_images(client, image):
+    _mock_series(image)
+    assert _post_tvdb_add(client).status_code == 303
+    with _session(client) as s:
+        assert s.scalar(select(Show)).poster_url is None
+
+
+@respx.mock
+def test_add_survives_tvdb_poster_lookup_failure(client):
+    _mock_series(POSTER, status=500)
+    assert _post_tvdb_add(client).status_code == 303
+    with _session(client) as s:
+        assert s.scalar(select(Show)).poster_url is None
+
+
+def test_add_without_tvdb_has_no_poster(client):
     r = client.post(
         "/add",
-        data={"search_title": "x", "tvdb_id": tvdb_id, "folder_name": "X",
-              "tvdb_season": "1", "release_season": "1", "poster_url": poster},
+        data={"search_title": "x", "tvdb_id": "", "folder_name": "X", "tvdb_season": "1",
+              "release_season": "1", "poster_url": POSTER},
     )
     assert r.status_code == 303
     with _session(client) as s:
         assert s.scalar(select(Show)).poster_url is None
+
+
+@pytest.mark.parametrize("tvdb_id", ["²", "１２", "abc", "1.5"])
+def test_odd_tvdb_id_is_a_400_not_a_crash(client, tvdb_id):
+    r = client.post(
+        "/add",
+        data={"search_title": "x", "tvdb_id": tvdb_id, "folder_name": "X",
+              "tvdb_season": "1", "release_season": "1"},
+    )
+    assert r.status_code == 400 and "Invalid TVDB id" in r.text
 
 
 @pytest.mark.parametrize(
@@ -571,17 +620,6 @@ def test_safe_image_url_allows_only_tvdb_artwork(url, ok):
     from kshow.tvdb import safe_image_url
 
     assert (safe_image_url(url) is not None) is ok
-
-
-def test_rejected_add_rerender_drops_untrusted_poster(client):
-    r = client.post(
-        "/add",
-        data={"search_title": "x", "tvdb_id": "5", "folder_name": "..",
-              "tvdb_season": "1", "release_season": "1",
-              "poster_url": "https://evil.example/x.jpg"},
-    )
-    assert r.status_code == 400
-    assert "evil.example" not in r.text
 
 
 @respx.mock
@@ -651,6 +689,19 @@ def test_browser_errors_render_the_card_page(client):
     assert "evil.example" not in r.text
     # API-style callers keep the JSON body
     assert client.get("/shows/999").json() == {"detail": "Show not found"}
+
+
+def test_error_page_for_logged_out_visitor_has_no_app_chrome(settings):
+    oidc = settings.model_copy(
+        update=dict(oidc_issuer="https://id.example.com", oidc_client_id="cid",
+                    oidc_client_secret="sec", app_url="https://kshow.example.com")
+    )
+    with TestClient(create_app(oidc), follow_redirects=False) as c:
+        r = c.get("/static/nope.css", headers={"Accept": "text/html"})
+        assert r.status_code == 404 and "Not found" in r.text
+        assert "/static/app.css" in r.text
+        assert "<nav>" not in r.text and "/logout" not in r.text
+        assert "Back to my shows" not in r.text
 
 
 # --- settings -------------------------------------------------------------------

@@ -6,7 +6,7 @@
     <ul class="matches">
     {% for card in cards %}
     <li>
-      <a class="card match" href="/add/confirm?{{ {'tvdb_id': card.m.id, 'title': title, 'season': season, 'poster': card.image or ''} | urlencode }}">
+      <a class="card match" href="/add/confirm?{{ {'tvdb_id': card.m.id, 'title': title, 'season': season} | urlencode }}">
         <span class="art match-art">{{ poster(card.image, card.placeholder) }}</span>
         <span class="match-text">
           <span class="match-title">{{ card.m.english_name or card.m.name }}</span>

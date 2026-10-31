@@ -1,9 +1,20 @@
-{% extends "base.html" %}
+{% extends "_auth_base.html" if logged_out else "base.html" %}
 {% block title %}{{ title }}{% endblock %}
 {% block content %}
+{% if logged_out %}
+<div class="auth-box">
+  <p class="logo logo-big">k<b>show</b></p>
+  <div class="card notice">
+    <h1>{{ title }}</h1>
+    <p class="muted">{{ message }}</p>
+  </div>
+  <a class="button primary block big" href="/login">Log in</a>
+</div>
+{% else %}
 <div class="card notice">
   <h1>{{ title }}</h1>
   <p class="muted">{{ message }}</p>
   <a class="button primary" href="/">Back to my shows</a>
 </div>
+{% endif %}
 {% endblock %}
