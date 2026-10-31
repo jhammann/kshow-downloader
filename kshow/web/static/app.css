@@ -6,7 +6,7 @@
   --border: #262a33;
   --text: #e8e6e3;
   --muted: #8a8f98;
-  --faint: #5d626b;
+  --faint: #5d626b; /* about 3:1 on --bg: placeholders and decoration only, never text */
   --accent: #f5b301;
   --accent-text: #111;
   --ok: #5fd38d;
@@ -71,20 +71,23 @@ code {
   color: var(--muted); text-decoration: none; font-weight: 600; font-size: 0.95rem;
 }
 .nav-link:hover { color: var(--text); }
+/* The link itself is the 44px tap target; the 36px gold pill is drawn on its inner span. */
 .pill-button {
+  display: inline-flex; align-items: center; min-height: 44px; padding: 0 2px;
+  color: var(--accent-text); text-decoration: none; border-radius: 999px;
+}
+.pill-button span {
   display: inline-flex; align-items: center; min-height: 36px; padding: 0 16px;
-  /* the tap target stays 44px tall through the margin box */
-  margin: 4px 0;
-  border-radius: 999px; background: var(--accent); color: var(--accent-text);
-  font-weight: 700; font-size: 0.95rem; text-decoration: none;
+  border-radius: 999px; background: var(--accent);
+  font-weight: 700; font-size: 0.95rem;
 }
 
 footer { text-align: center; padding-bottom: max(24px, env(safe-area-inset-bottom)); }
 button.link {
-  background: none; border: none; color: var(--faint); font-weight: 500;
+  background: none; border: none; color: var(--muted); font-weight: 500;
   font-size: 0.9rem; padding: 0 12px; min-height: 44px; margin: 0;
 }
-button.link:hover { color: var(--muted); }
+button.link:hover { color: var(--text); }
 
 /* --- sections and the poster grid --------------------------------------------- */
 .section-title {
@@ -220,7 +223,7 @@ button:hover, .button:hover { border-color: #3a3f4a; }
 .primary:hover { border-color: var(--accent); filter: brightness(1.06); }
 .ghost { background: transparent; }
 .big { min-height: 50px; font-size: 1rem; }
-.small { min-height: 36px; padding: 6px 14px; font-size: 0.85rem; margin-top: 6px; }
+.small { min-height: 44px; padding: 6px 16px; font-size: 0.85rem; margin-top: 6px; }
 .block { display: flex; width: 100%; }
 .card form button, .card > button { width: 100%; }
 
@@ -233,7 +236,7 @@ body.auth main { width: 100%; max-width: 380px; padding-top: 24px; padding-botto
 .auth-box { display: flex; flex-direction: column; align-items: stretch; text-align: center; }
 .logo-big { font-size: 2.6rem; justify-content: center; margin: 0 0 6px; }
 .tagline { color: var(--muted); margin: 0 0 32px; }
-.fine { margin: 16px 0 0; font-size: 0.8rem; color: var(--faint); }
+.fine { margin: 16px 0 0; font-size: 0.8rem; color: var(--muted); }
 .auth-box .card { text-align: left; margin: 20px 0 4px; }
 
 /* --- show detail and confirm hero ------------------------------------------- */
