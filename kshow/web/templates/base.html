@@ -2,27 +2,32 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0f1115">
   <title>{% block title %}kshow{% endblock %} · kshow</title>
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/htmx.min.js" defer></script>
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
+  {% block header %}
   <header class="top">
-    <a class="brand" href="/">kshow</a>
+    <a class="logo" href="/" aria-label="kshow, all shows">k<b>show</b></a>
     <nav>
-      <a href="/add">Add</a>
-      <a href="/settings">Settings</a>
+      <a class="pill-button" href="/add">+ Add</a>
+      <a class="nav-link" href="/settings">Settings</a>
     </nav>
   </header>
+  {% endblock %}
   <main>
     {% block content %}{% endblock %}
   </main>
+  {% block footer %}
   {% if request.app.state.settings.auth_enabled %}
   <footer>
     <form method="post" action="/logout"><button class="link" type="submit">Log out</button></form>
   </footer>
   {% endif %}
+  {% endblock %}
 </body>
 </html>

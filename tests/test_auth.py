@@ -213,3 +213,45 @@ def test_empty_or_short_secret_rejected(tmp_path):
         load_session_secret(s)
     with pytest.raises(RuntimeError):
         load_session_secret(_settings(tmp_path, session_secret="short"))
+
+
+def test_login_page_names_the_provider_and_uses_the_stylesheet(tmp_path):
+    with TestClient(create_app(_oidc(tmp_path))) as c:
+        r = c.get("/login")
+        assert r.status_code == 200
+        assert "Log in with Pocket ID" in r.text
+        assert 'href="/auth/start"' in r.text
+        assert '<link rel="stylesheet" href="/static/app.css">' in r.text
+        assert "Only invited accounts can sign in" in r.text
+        # no app chrome on the login page
+        assert "<nav>" not in r.text and "/logout" not in r.text
+
+
+def test_provider_name_is_configurable_and_escaped(tmp_path):
+    app = create_app(_oidc(tmp_path, oidc_provider_name="Hammann <ID>"))
+    with TestClient(app) as c:
+        r = c.get("/login")
+        assert "Log in with Hammann &lt;ID&gt;" in r.text
+
+
+def test_provider_name_from_env(monkeypatch):
+    from kshow.config import Settings
+
+    monkeypatch.setenv("OIDC_PROVIDER_NAME", "Hammann ID")
+    assert Settings(_env_file=None).oidc_provider_name == "Hammann ID"
+    monkeypatch.delenv("OIDC_PROVIDER_NAME")
+    assert Settings(_env_file=None).oidc_provider_name == "Pocket ID"
+
+
+def test_auth_error_pages_use_the_stylesheet(tmp_path, monkeypatch):
+    app = create_app(_oidc(tmp_path, oidc_allowed_users=["1"]))
+    _mock_token(monkeypatch, app, {"userinfo": {"sub": "2"}})
+    with TestClient(app, base_url=HTTPS, follow_redirects=False) as c:
+        r = c.get("/auth/callback")
+        assert r.status_code == 403 and "Not allowed" in r.text
+        assert "/static/app.css" in r.text and "<nav>" not in r.text
+    _mock_token(monkeypatch, app, {})
+    with TestClient(app, base_url=HTTPS, follow_redirects=False) as c:
+        r = c.get("/auth/callback")
+        assert r.status_code == 400 and "Login failed" in r.text
+        assert "/static/app.css" in r.text and 'href="/login"' in r.text

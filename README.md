@@ -46,6 +46,7 @@ multi-arch (amd64 and arm64) and exposes port 8080; `/healthz` is the health che
 | `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | The OIDC client from Pocket ID. |
 | `OIDC_ALLOWED_GROUPS` | Comma-separated Pocket ID groups allowed to log in. |
 | `OIDC_ALLOWED_USERS` | Comma-separated allow-list of user `sub` values or verified emails. |
+| `OIDC_PROVIDER_NAME` | Name on the login button, as in "Log in with Pocket ID" (default `Pocket ID`). |
 | `SESSION_SECRET` | Session signing key (at least 32 characters). If unset, one is generated and stored in `/config/session_secret`. |
 | `CONFIG_DIR`, `TV_DIR`, `DOWNLOADS_DIR` | Override the in-container paths (defaults `/config`, `/tv`, `/downloads`). |
 | `DISABLE_SCHEDULER` | Set to `1` to disable the background polling (useful for testing). |

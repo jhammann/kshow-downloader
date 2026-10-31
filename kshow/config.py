@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     oidc_client_secret: str = ""
     oidc_allowed_users: Annotated[list[str], NoDecode] = []
     oidc_allowed_groups: Annotated[list[str], NoDecode] = []
+    oidc_provider_name: str = "Pocket ID"  # shown on the login button
 
     app_url: str = ""
     session_secret: str | None = None

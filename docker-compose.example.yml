@@ -27,6 +27,7 @@ services:
       OIDC_CLIENT_ID: kshow
       OIDC_CLIENT_SECRET: changeme
       OIDC_ALLOWED_GROUPS: kshow
+      OIDC_PROVIDER_NAME: Hammann ID
     volumes:
       - /nas/Config/kshow:/config
       - /nas/Media/TV:/tv

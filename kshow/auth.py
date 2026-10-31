@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from kshow.config import Settings
+from kshow.web.templating import templates
 
 log = logging.getLogger(__name__)
 
@@ -157,21 +158,23 @@ def require_user(request: Request) -> dict:
     raise HTTPException(status_code=401, detail="Not authenticated")
 
 
-def _page(title: str, body: str, status: int = 200) -> HTMLResponse:
-    return HTMLResponse(
-        "<!doctype html><html lang=en><head><meta charset=utf-8>"
-        '<meta name=viewport content="width=device-width,initial-scale=1">'
-        f"<title>{title}</title></head><body>{body}</body></html>",
+def _page(
+    request: Request, title: str, message: str, status: int = 200, retry: bool = False
+) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "auth_message.html",
+        {"title": title, "message": message, "retry": retry},
         status_code=status,
     )
 
 
 @router.get("/login")
-async def login():
-    return _page(
-        "Log in",
-        '<h1>kshow</h1><a href="/auth/start" style="display:block;min-height:44px;'
-        'padding:12px;text-align:center">Log in</a>',
+async def login(request: Request):
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        {"provider": request.app.state.settings.oidc_provider_name},
     )
 
 
@@ -185,13 +188,12 @@ async def auth_start(request: Request):
         return await client.authorize_redirect(request, redirect_uri)
     except Exception as exc:  # provider unreachable / bad metadata
         log.warning("OIDC start failed: %s", type(exc).__name__)
-        return _bad_request(502)
+        return _bad_request(request, 502)
 
 
-def _bad_request(status: int = 400) -> HTMLResponse:
-    return _page(
-        "Login failed", "<p>Login failed. <a href=/login>Try again</a></p>", status
-    )
+def _bad_request(request: Request, status: int = 400) -> HTMLResponse:
+    return _page(request, "Login failed", "Something went wrong while logging in.", status,
+                 retry=True)
 
 
 @router.get("/auth/callback")
@@ -204,11 +206,11 @@ async def auth_callback(request: Request):
         token = await client.authorize_access_token(request)
     except Exception as exc:  # OAuthError, state mismatch, network, bad token
         log.warning("OIDC callback failed: %s", type(exc).__name__)
-        return _bad_request()
+        return _bad_request(request)
     claims = dict(token.get("userinfo") or {})
     if not claims.get("sub"):
         log.warning("OIDC callback returned no usable claims")
-        return _bad_request()
+        return _bad_request(request)
     if settings.oidc_allowed_groups and "groups" not in claims:
         try:
             info = await client.userinfo(token=token)
@@ -217,13 +219,15 @@ async def auth_callback(request: Request):
             info = {}
         if info.get("sub") is not None and info["sub"] != claims["sub"]:
             log.warning("OIDC userinfo sub mismatch")
-            return _bad_request()
+            return _bad_request(request)
         if "groups" in info:
             claims["groups"] = info["groups"]
     if not is_allowed(claims, settings.oidc_allowed_users, settings.oidc_allowed_groups):
         log.warning("OIDC login denied for %s", claims.get("preferred_username"))
         request.session.clear()
-        return _page("Not allowed", "<h1>Not allowed</h1>", 403)
+        return _page(
+            request, "Not allowed", "This account has not been invited to kshow.", 403
+        )
     request.session.clear()
     request.session["user"] = {
         "sub": claims["sub"],

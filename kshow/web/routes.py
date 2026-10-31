@@ -12,7 +12,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -22,12 +21,9 @@ from kshow.library import season_folder_name, suggest_folder
 from kshow.releases import parse_user_input
 from kshow.scheduler import reschedule_check, trigger_check
 from kshow.tvdb import TvdbError, TvdbMatch, safe_image_url
+from kshow.web.templating import STATIC_DIR, templates
 
 log = logging.getLogger(__name__)
-
-HERE = Path(__file__).parent
-STATIC_DIR = HERE / "static"
-templates = Jinja2Templates(directory=HERE / "templates")
 
 router = APIRouter(dependencies=[Depends(require_user), Depends(require_same_origin)])
 

@@ -1,0 +1,10 @@
+{% extends "_auth_base.html" %}
+{% block title %}Log in{% endblock %}
+{% block content %}
+<div class="auth-box">
+  <h1 class="logo logo-big">k<b>show</b></h1>
+  <p class="tagline">Korean shows, straight to Plex</p>
+  <a class="button primary block big" href="/auth/start">Log in with {{ provider }}</a>
+  <p class="fine">Only invited accounts can sign in</p>
+</div>
+{% endblock %}
