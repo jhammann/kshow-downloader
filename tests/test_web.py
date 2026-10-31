@@ -478,12 +478,22 @@ def test_poster_carried_from_search_to_new_show(client):
 
 @pytest.mark.parametrize(
     "poster,tvdb_id",
-    [("http://artworks.thetvdb.com/1.jpg", "123"), ("javascript:alert(1)", "123"),
-     (POSTER, "")],
+    [
+        ("http://artworks.thetvdb.com/1.jpg", "123"),
+        ("javascript:alert(1)", "123"),
+        ("https://evil.example/x.jpg", "123"),
+        ("https://artworks.thetvdb.com.evil.com/x.jpg", "123"),
+        ("https://user@artworks.thetvdb.com/x.jpg", "123"),
+        ("https://artworks.thetvdb.com:8443/x.jpg", "123"),
+        (POSTER, ""),
+    ],
 )
 def test_poster_must_be_https_and_linked_to_tvdb(client, poster, tvdb_id):
-    r = client.get("/add/confirm", params={"title": "x", "season": 1, "poster": poster})
-    assert "javascript:" not in r.text and "http://artworks" not in r.text
+    params = {"title": "x", "season": 1, "poster": poster}
+    if tvdb_id:
+        params["tvdb_id"] = tvdb_id
+    r = client.get("/add/confirm", params=params)
+    assert poster not in r.text
     r = client.post(
         "/add",
         data={"search_title": "x", "tvdb_id": tvdb_id, "folder_name": "X",
@@ -492,6 +502,52 @@ def test_poster_must_be_https_and_linked_to_tvdb(client, poster, tvdb_id):
     assert r.status_code == 303
     with _session(client) as s:
         assert s.scalar(select(Show)).poster_url is None
+
+
+@pytest.mark.parametrize(
+    "url,ok",
+    [
+        ("https://artworks.thetvdb.com/banners/v4/series/123/posters/abc.jpg", True),
+        ("https://ARTWORKS.thetvdb.com/banners/x.jpg", True),
+        ("https://evil.example/x.jpg", False),
+        ("https://artworks.thetvdb.com.evil.com/x.jpg", False),
+        ("https://user@artworks.thetvdb.com/x.jpg", False),
+        ("https://user:pw@artworks.thetvdb.com/x.jpg", False),
+        ("https://artworks.thetvdb.com:443/x.jpg", False),
+        ("http://artworks.thetvdb.com/x.jpg", False),
+        ("//artworks.thetvdb.com/x.jpg", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_safe_image_url_allows_only_tvdb_artwork(url, ok):
+    from kshow.tvdb import safe_image_url
+
+    assert (safe_image_url(url) is not None) is ok
+
+
+def test_rejected_add_rerender_drops_untrusted_poster(client):
+    r = client.post(
+        "/add",
+        data={"search_title": "x", "tvdb_id": "5", "folder_name": "..",
+              "tvdb_season": "1", "release_season": "1",
+              "poster_url": "https://evil.example/x.jpg"},
+    )
+    assert r.status_code == 400
+    assert "evil.example" not in r.text
+
+
+@respx.mock
+def test_search_results_drop_non_tvdb_images(client):
+    _mock_tvdb().mock(
+        return_value=httpx.Response(
+            200,
+            json={"data": [{"tvdb_id": "123", "name": "x",
+                            "image_url": "https://evil.example/x.jpg"}]},
+        )
+    )
+    r = client.post("/add/search", data={"query": "x"})
+    assert "tvdb_id=123" in r.text and "evil.example" not in r.text
 
 
 # --- show page actions ----------------------------------------------------------

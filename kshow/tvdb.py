@@ -4,7 +4,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import date
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -18,9 +18,32 @@ class TvdbError(Exception):
     """Any TVDB failure: transport error, login failure or unexpected status."""
 
 
+# Hosts TVDB serves artwork from. Poster URLs are loaded by every viewer's browser, so only
+# these exact hosts are accepted, whether the URL came from TVDB or from a submitted form.
+IMAGE_HOSTS = frozenset({"artworks.thetvdb.com"})
+MAX_IMAGE_URL_LEN = 1000
+
+
 def safe_image_url(url: str | None) -> str | None:
-    """url when it is an https:// address safe to put in an <img src>, else None."""
-    return url if isinstance(url, str) and url.startswith("https://") else None
+    """url when it is a plain https:// TVDB artwork address, else None."""
+    if not isinstance(url, str) or not url or len(url) > MAX_IMAGE_URL_LEN:
+        return None
+    if any(ch.isspace() or ord(ch) < 32 or ch == "\\" for ch in url):
+        return None
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    if (
+        parts.scheme != "https"
+        or "@" in parts.netloc
+        or port is not None
+        or parts.netloc.endswith(":")
+        or parts.hostname not in IMAGE_HOSTS
+    ):
+        return None
+    return url
 
 
 def _eng(translations) -> str | None:

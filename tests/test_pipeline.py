@@ -512,10 +512,10 @@ async def test_poster_backfill_keeps_existing_and_ignores_errors(db, http, tmp_p
 
 
 @respx.mock
-async def test_poster_backfill_rejects_non_https(db, http, tmp_path):
+async def test_poster_backfill_rejects_non_tvdb_host(db, http, tmp_path):
     mock_tvdb(77, [(1, date(2026, 10, 11))])
     respx.get(f"{TVDB}/series/77").respond(
-        200, json={"data": {"id": 77, "name": TITLE, "image": "http://x/p.jpg"}}
+        200, json={"data": {"id": 77, "name": TITLE, "image": "https://evil.example/p.jpg"}}
     )
     mock_search()
     show_id = add_show(db, tvdb_id=77)

@@ -212,13 +212,6 @@ def _redirect(url: str) -> RedirectResponse:
     return RedirectResponse(url, status_code=303)
 
 
-MAX_URL_LEN = 1000
-
-
-def _poster(url: str | None) -> str | None:
-    return safe_image_url(url) if url and len(url) <= MAX_URL_LEN else None
-
-
 # --- show list --------------------------------------------------------------------
 
 
@@ -291,7 +284,7 @@ async def add_search(request: Request):
             log.warning("TVDB search failed: %s", e)
             error = "TVDB could not be reached. Try again, or add without TVDB."
     cards = [
-        {"m": m, "image": _poster(m.image_url)} for m in matches
+        {"m": m, "image": safe_image_url(m.image_url)} for m in matches
     ]
     return _render(
         request,
@@ -337,7 +330,7 @@ async def add_confirm(
         "folder_name": folder or "",
         "tvdb_season": str(season),
         "release_season": str(season),
-        "poster_url": (_poster(poster) or "") if tvdb_id is not None else "",
+        "poster_url": (safe_image_url(poster) or "") if tvdb_id is not None else "",
     }
     notes = [_SANITISED_NOTE.format(folder)] if changed else []
     return _render_confirm(request, form, english=english, notes=notes)
@@ -352,6 +345,7 @@ def _render_confirm(
     status_code: int = 200,
 ) -> HTMLResponse:
     """The confirm page, with the library path the pre-filled values lead to."""
+    form = {**form, "poster_url": safe_image_url(form.get("poster_url")) or ""}
     tv_dir = request.app.state.settings.tv_dir
     folder = form["folder_name"]
     season = _season(form["tvdb_season"])
@@ -396,6 +390,8 @@ async def add_show(request: Request):
             tvdb_id = int(form["tvdb_id"])
         except ValueError:
             errors.append("Invalid TVDB id.")
+    # Never trust the submitted poster: keep it only when it is TVDB artwork for a TVDB show.
+    form["poster_url"] = (safe_image_url(form["poster_url"]) or "") if tvdb_id is not None else ""
     tv_dir = request.app.state.settings.tv_dir
     folder, changed = choose_folder(tv_dir, form["folder_name"])
     if folder is None:
@@ -429,7 +425,7 @@ async def add_show(request: Request):
             tvdb_season=tvdb_season,
             folder_name=folder,
             season_folder=season_folder_name(tv_dir / folder, tvdb_season),
-            poster_url=_poster(form["poster_url"]) if tvdb_id is not None else None,
+            poster_url=form["poster_url"] or None,
         )
         session.add(show)
         session.commit()
