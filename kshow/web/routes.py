@@ -503,6 +503,10 @@ async def add_show(request: Request):
     if not errors and changed:
         form["folder_name"] = folder
         return _render_confirm(request, form, notes=[_SANITISED_NOTE.format(folder)])
+    # The poster comes from TVDB, never from the form; the check backfills it on failure.
+    # Look it up before the duplicate check so check-and-insert below has no await in between:
+    # a double-tapped submit can then never create the same show twice.
+    poster = await _tvdb_poster(request, tvdb_id) if not errors else None
     with _session(request) as session:
         if not errors:
             dup = session.scalar(
@@ -516,8 +520,6 @@ async def add_show(request: Request):
                 return _redirect(f"/shows/{dup.id}")
         if errors:
             return _render_confirm(request, form, errors=errors, status_code=400)
-        # The poster comes from TVDB, never from the form; the check backfills it on failure.
-        poster = await _tvdb_poster(request, tvdb_id)
         show = Show(
             search_title=title,
             release_season=release_season,
