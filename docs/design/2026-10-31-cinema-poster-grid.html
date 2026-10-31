@@ -1,0 +1,58 @@
+<style>
+  .wrap { display:flex; gap:22px; flex-wrap:wrap; margin-top:18px; }
+  .phone { width:300px; height:600px; border-radius:30px; overflow:hidden; box-shadow:0 10px 30px rgba(0,0,0,.3); font-size:13px;
+           background:#0f1115; color:#e8e6e3; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; position:relative; }
+  .cap { font-size:12px; opacity:.7; margin-top:8px; text-align:center; }
+  .hd { display:flex; justify-content:space-between; align-items:center; padding:18px 16px 8px; }
+  .logo { font-weight:800; letter-spacing:-.5px; font-size:18px; } .logo b { color:#f5b301; }
+  .add { background:#f5b301; color:#111; border-radius:20px; padding:7px 14px; font-weight:700; }
+  .sec { padding:10px 16px 8px; text-transform:uppercase; font-size:11px; letter-spacing:1px; color:#8a8f98; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:0 16px; }
+  .poster { height:150px; border-radius:10px; position:relative; overflow:hidden; }
+  .poster::after { content:""; position:absolute; inset:0; background:linear-gradient(180deg,transparent 45%,rgba(0,0,0,.55)); }
+  .p1 { background:linear-gradient(135deg,#f7b267,#f25f5c); } .p2 { background:linear-gradient(135deg,#70a1d7,#3c4f76); }
+  .p3 { background:linear-gradient(135deg,#a1c181,#2e6f40); } .p4 { background:linear-gradient(135deg,#d4a5ff,#6a4c93); }
+  .pill { position:absolute; left:8px; bottom:8px; z-index:1; font-size:10.5px; font-weight:700; padding:3px 8px; border-radius:10px; backdrop-filter:blur(6px); }
+  .dl { background:rgba(245,179,1,.9); color:#111; } .ok { background:rgba(40,40,40,.75); color:#5fd38d; } .late { background:rgba(40,40,40,.75); color:#ff7a7a; }
+  .bar { position:absolute; left:0; right:0; bottom:0; height:3px; background:rgba(255,255,255,.15); z-index:1; } .bar i { display:block; height:100%; width:42%; background:#f5b301; }
+  .t { font-weight:650; margin-top:7px; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .k { color:#8a8f98; font-size:11.5px; }
+  .fin .poster { filter:grayscale(.7); opacity:.6; }
+  .login { display:flex; flex-direction:column; justify-content:center; align-items:center; text-align:center; padding:30px;
+           background:radial-gradient(circle at 50% 30%,#2a2210,#0f1115 60%); }
+  .login .logo { font-size:36px; margin-bottom:8px; }
+  .login p { color:#8a8f98; margin:0 0 30px; font-size:13px; }
+  .login .btn { background:#f5b301; color:#111; font-weight:700; border-radius:12px; padding:14px 10px; width:100%; font-size:14px; }
+  .login .fine { margin-top:14px; font-size:11px; color:#5d626b; }
+</style>
+
+<h2>A · Cinema, with C's poster grid</h2>
+<p class="subtitle">Dark Cinema palette and gold accent; shows as a two-column poster grid with the status pill and progress bar on the artwork; finished shows greyed out in their own section. Login button reads "Log in with Hammann ID".</p>
+
+<div class="wrap">
+  <div>
+    <div class="phone">
+      <div class="hd"><div class="logo">k<b>show</b></div><div class="add">+ Add</div></div>
+      <div class="sec">Following</div>
+      <div class="grid">
+        <div><div class="poster p1"><span class="pill dl">E04 · 42%</span><div class="bar"><i></i></div></div><div class="t">The Wonder Coach</div><div class="k">신인감독 김연경 · S2</div></div>
+        <div><div class="poster p2"><span class="pill ok">E08 in Plex</span></div><div class="t">Moving Day</div><div class="k">이사하는 날 · S1</div></div>
+        <div><div class="poster p3"><span class="pill late">E05 · 2d late</span></div><div class="t">Green Hearts</div><div class="k">초록 마음 · S1</div></div>
+      </div>
+      <div class="sec" style="margin-top:6px">Finished</div>
+      <div class="grid fin">
+        <div><div class="poster p4" style="height:90px"></div><div class="t">Night Market</div></div>
+      </div>
+    </div>
+    <div class="cap">Show list</div>
+  </div>
+  <div>
+    <div class="phone login">
+      <div class="logo">k<b>show</b></div>
+      <p>Korean shows, straight to Plex</p>
+      <div class="btn">Log in with Hammann ID</div>
+      <div class="fine">Only invited accounts can sign in</div>
+    </div>
+    <div class="cap">Login</div>
+  </div>
+</div>
