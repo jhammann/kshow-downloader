@@ -5,6 +5,7 @@ import math
 import os
 import re
 import unicodedata
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -118,6 +119,57 @@ def _season(value: str) -> int | None:
     return n if 1 <= n <= 99 else None
 
 
+@dataclass(frozen=True)
+class ShowStatus:
+    """What the show-list pill says.
+
+    kind is one of downloading | ok | late | waiting | finished | stopped; progress is the
+    0..1 fraction of the episode being downloaded, else None.
+    """
+
+    kind: str
+    label: str
+    progress: float | None = None
+
+
+def _late_episodes(episodes: list[Episode], today: date) -> list[Episode]:
+    return sorted(
+        (e for e in episodes
+         if e.state in ("wanted", "failed") and e.tvdb_airdate and e.tvdb_airdate < today),
+        key=lambda e: e.number,
+    )
+
+
+def show_status(
+    show: Show, episodes: list[Episode], grabs: list[Grab], today: date | None = None
+) -> ShowStatus:
+    """The one most useful fact about a show: downloading, late, in Plex or waiting."""
+    if show.status == "finished":
+        return ShowStatus("finished", "Finished")
+    if show.status == "stopped":
+        return ShowStatus("stopped", "Stopped")
+    today = today or utcnow().date()
+    progress = {g.episode_id: g.progress for g in grabs if g.state == "downloading"}
+    downloading = sorted(
+        (e for e in episodes if e.state == "downloading"), key=lambda e: e.number
+    )
+    if downloading:
+        ep = downloading[0]
+        pct = progress.get(ep.id)
+        if pct is None:
+            return ShowStatus("downloading", f"E{ep.number:02} · starting", 0.0)
+        pct = min(max(pct, 0.0), 1.0)
+        return ShowStatus("downloading", f"E{ep.number:02} · {math.floor(pct * 100)}%", pct)
+    late = _late_episodes(episodes, today)
+    if late:
+        days = (today - late[0].tvdb_airdate).days
+        return ShowStatus("late", f"E{late[0].number:02} · {days}d late")
+    downloaded = [e.number for e in episodes if e.state == "downloaded"]
+    if downloaded:
+        return ShowStatus("ok", f"E{max(downloaded):02} in Plex")
+    return ShowStatus("waiting", "Waiting")
+
+
 def status_line(
     show: Show, episodes: list[Episode], grabs: list[Grab], today: date | None = None
 ) -> str:
@@ -136,11 +188,7 @@ def status_line(
             pct = progress.get(e.id)
             suffix = f" {math.floor(pct * 100)}%" if pct is not None else ""
             parts.append(f"E{e.number:02} downloading{suffix}")
-    late = sorted(
-        (e for e in episodes
-         if e.state in ("wanted", "failed") and e.tvdb_airdate and e.tvdb_airdate < today),
-        key=lambda e: e.number,
-    )
+    late = _late_episodes(episodes, today)
     if late:
         days = (today - late[0].tvdb_airdate).days
         parts.append(

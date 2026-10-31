@@ -10,7 +10,7 @@ from kshow.config import Settings
 from kshow.db import Episode, Grab, Show, SourceRow, get_setting, utcnow
 from kshow.main import create_app
 from kshow.web import routes
-from kshow.web.routes import sanitize_folder, status_line
+from kshow.web.routes import ShowStatus, sanitize_folder, show_status, status_line
 
 TVDB = "https://api4.thetvdb.com/v4"
 
@@ -101,6 +101,36 @@ def test_status_line_variants():
     assert status_line(show, eps, [], today) == "E01 downloaded · E02 not found yet, 1 day late"
     assert status_line(_show("stopped"), eps, [], today) == "Stopped"
     assert status_line(show, [], [], today) == "Waiting for episodes"
+
+
+def test_show_status_kinds():
+    today = date(2026, 10, 30)
+    show = _show()
+    done = [_ep(i, i, "downloaded") for i in (1, 2, 3)]
+    grab = Grab(episode_id=4, post_url="u", release_name="r", qbit_tag="t",
+                state="downloading", progress=0.42)
+
+    assert show_status(show, done + [_ep(4, 4, "downloading")], [grab], today) == ShowStatus(
+        "downloading", "E04 · 42%", 0.42
+    )
+    # downloading without a known progress yet
+    assert show_status(show, [_ep(4, 4, "downloading")], [], today) == ShowStatus(
+        "downloading", "E04 · starting", 0.0
+    )
+    assert show_status(show, done, [], today) == ShowStatus("ok", "E03 in Plex", None)
+    late = done + [_ep(4, 4, "wanted", today - timedelta(days=2))]
+    assert show_status(show, late, [], today) == ShowStatus("late", "E04 · 2d late", None)
+    one_day = [_ep(5, 5, "failed", today - timedelta(days=1))]
+    assert show_status(show, one_day, [], today).label == "E05 · 1d late"
+    future = [_ep(6, 6, "wanted", today + timedelta(days=3))]
+    assert show_status(show, future, [], today) == ShowStatus("waiting", "Waiting", None)
+    assert show_status(show, [], [], today).kind == "waiting"
+    assert show_status(_show("finished"), done, [], today) == ShowStatus(
+        "finished", "Finished", None
+    )
+    assert show_status(_show("stopped"), late, [], today) == ShowStatus(
+        "stopped", "Stopped", None
+    )
 
 
 @pytest.mark.parametrize(
