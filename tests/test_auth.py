@@ -191,6 +191,9 @@ def test_auth_start_redirects_to_provider(tmp_path, monkeypatch):
         assert loc.startswith("https://id.example.com/authorize?")
         assert "redirect_uri=https%3A%2F%2Fkshow.example.com%2Fauth%2Fcallback" in loc
         assert "scope=openid+profile+email+groups" in loc
+        # Pocket ID clients can require PKCE; always send an S256 challenge
+        assert "code_challenge=" in loc
+        assert "code_challenge_method=S256" in loc
 
 
 def test_session_secret_created_once_with_0600(tmp_path):

@@ -120,7 +120,8 @@ def build_oauth(settings: Settings) -> OAuth:
         client_secret=settings.oidc_client_secret,
         server_metadata_url=settings.oidc_issuer.rstrip("/")
         + "/.well-known/openid-configuration",
-        client_kwargs={"scope": "openid profile email groups"},
+        # PKCE (S256): Pocket ID clients can require it, and it is good practice regardless
+        client_kwargs={"scope": "openid profile email groups", "code_challenge_method": "S256"},
     )
     return oauth
 
