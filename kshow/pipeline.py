@@ -180,27 +180,53 @@ async def _backfill_poster(session: Session, deps: Deps, show: Show) -> None:
         session.commit()
 
 
+@dataclass
+class SearchResult:
+    candidates: list[Candidate]
+    answered: bool  # at least one source answered its first results page
+
+
 async def search_candidates(
     session: Session,
     deps: Deps,
     sources: list[TorrenttipSource],
     query: str,
     pages: int = 1,
-) -> list[Candidate]:
+    wanted: set[int] | None = None,
+    release_season: int | None = None,
+) -> SearchResult:
     """Search every source for query, reading up to `pages` result pages per source.
 
-    A source stops at the first page that has no release of exactly this title (older
-    results are other shows) or nothing new. Candidates are unique by post URL.
+    A source stops paging at the first page with no new release of exactly this title (older
+    results are other shows), once every `wanted` episode of `release_season` has a release,
+    or when a later page fails (keeping what was found; only a failing first page marks the
+    source unreachable). Candidates are unique by post URL.
     """
     title = normalize_title(query)
     candidates: dict[str, Candidate] = {}
+    answered = False
+
+    def all_found() -> bool:
+        if not wanted:
+            return False
+        found = {
+            c.release.episode
+            for c in candidates.values()
+            if normalize_title(c.release.title) == title
+            and c.release.season == release_season
+        }
+        return wanted <= found
+
     for source in sources:
         row = session.scalar(select(SourceRow).where(SourceRow.name == source.name))
         for page in range(1, pages + 1):
             try:
                 found = await source.search(query, page)
             except SourceUnreachable as e:
-                log.warning("source %s unreachable (page %d): %s", source.name, page, e)
+                if page > 1:
+                    log.info("%s page %d failed, keeping earlier pages: %s", source.name, page, e)
+                    break
+                log.warning("source %s unreachable: %s", source.name, e)
                 if row is not None and row.unreachable_since is None:
                     row.unreachable_since = utcnow()
                     session.commit()
@@ -208,16 +234,20 @@ async def search_candidates(
                         "Source unreachable", f"{source.name} is unreachable"
                     )
                 break
-            if row is not None and row.unreachable_since is not None:
-                row.unreachable_since = None
-                session.commit()
-                await deps.notifier.send("Source back", f"{source.name} is reachable again.")
+            if page == 1:
+                answered = True
+                if row is not None and row.unreachable_since is not None:
+                    row.unreachable_since = None
+                    session.commit()
+                    await deps.notifier.send(
+                        "Source back", f"{source.name} is reachable again."
+                    )
             new = [c for c in found if c.post_url not in candidates]
             for c in new:
                 candidates[c.post_url] = c
-            if not any(normalize_title(c.release.title) == title for c in new):
+            if not any(normalize_title(c.release.title) == title for c in new) or all_found():
                 break
-    return list(candidates.values())
+    return SearchResult(list(candidates.values()), answered)
 
 
 async def _already_in_qbit(deps: Deps, data: bytes) -> bool:
@@ -271,8 +301,8 @@ async def grab_selected(
             session.commit()
             await deps.notifier.send(
                 "Download failed",
-                f"{label}: the download link didn't return a torrent ({c.release.raw}). "
-                "kshow will try another release.",
+                f"{label}: the download link didn't return a torrent ({c.release.raw})."
+                + (" kshow will try another release." if ep.monitored else ""),
             )
             continue
         # Retry an earlier failed add of this same post under its own grab and tag, so
@@ -422,7 +452,9 @@ async def check_show(deps: Deps, show_id: int) -> None:
         if followed:
             # 3. One search covers every season
             sources = build_sources(session, deps.http, deps.settings)
-            candidates = await search_candidates(session, deps, sources, show.search_title)
+            candidates = (
+                await search_candidates(session, deps, sources, show.search_title)
+            ).candidates
             title = normalize_title(show.search_title)
             preferred = get_setting(session, "preferred_resolution")
 

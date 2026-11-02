@@ -4,7 +4,9 @@ Works on every show and season, followed or not. A manual search never makes an 
 monitored, so nothing it asked for is retried automatically if it isn't found or fails.
 """
 
+import asyncio
 import logging
+import os
 from pathlib import Path
 
 from sqlalchemy import delete, select
@@ -29,13 +31,22 @@ MANUAL_PAGES = 5
 
 
 def files_on_disk(tv_dir: Path, show: Show, season: Season) -> set[int] | None:
-    """Episode numbers with a video file in the season folder; None when that is unknown
-    (the folder is absent or unreadable, e.g. /tv not mounted)."""
-    season_dir = tv_dir / show.folder_name / season.folder
+    """Episode numbers with a video file in the season folder.
+
+    An absent season folder under a readable show folder (or, with no show folder, a readable
+    tv_dir) holds no files. None means unknown: tv_dir is absent (e.g. /tv not mounted) or the
+    nearest existing folder can't be read.
+    """
+    show_dir = tv_dir / show.folder_name
+    season_dir = show_dir / season.folder
     try:
-        if not season_dir.is_dir():
-            return None
-        return existing_episodes(season_dir, season.number)
+        if season_dir.is_dir():
+            return existing_episodes(season_dir, season.number)
+        for parent in (show_dir, tv_dir):
+            if parent.is_dir():
+                os.listdir(parent)  # readable?
+                return set()
+        return None
     except OSError as e:
         log.warning("cannot read %s: %s", season_dir, e)
         return None
@@ -126,7 +137,7 @@ async def search_episodes(
             return
 
         # Files already in the library count as downloaded (a stopped show is never checked).
-        on_disk = files_on_disk(deps.settings.tv_dir, show, season)
+        on_disk = await asyncio.to_thread(files_on_disk, deps.settings.tv_dir, show, season)
         for number in on_disk or ():
             _episode(session, season, number).state = "downloaded"
         session.commit()
@@ -139,9 +150,24 @@ async def search_episodes(
         log.info("manual search for %s E%s", label, ",".join(f"{n:02}" for n in sorted(wanted)))
 
         sources = build_sources(session, deps.http, deps.settings)
-        candidates = await search_candidates(
-            session, deps, sources, show.search_title, pages=MANUAL_PAGES
+        result = await search_candidates(
+            session,
+            deps,
+            sources,
+            show.search_title,
+            pages=MANUAL_PAGES,
+            wanted=wanted,
+            release_season=season.release_season,
         )
+        if not result.answered:
+            what = f"{label}E{numbers[0]:02}" if numbers and len(numbers) == 1 else label
+            await deps.notifier.send(
+                "Search failed",
+                f"Couldn't search for {what}: no source is reachable right now. "
+                "Try again later.",
+            )
+            return
+        candidates = result.candidates
         failed = {
             (number, url)
             for number, url in session.execute(

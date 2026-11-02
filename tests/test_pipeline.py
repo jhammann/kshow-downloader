@@ -12,10 +12,10 @@ from kshow.db import (
     Episode, Grab, Season, Show, SourceRow, get_setting, init_db, set_setting, utcnow,
 )
 from kshow.notify import Notifier
-from kshow.pipeline import Deps, check_all_shows, check_show, select_releases
+from kshow.pipeline import Deps, check_all_shows, check_show, grab_selected, select_releases
 from kshow.qbit import QbitClient
 from kshow.releases import parse_release_name
-from kshow.sources.torrenttip import Candidate
+from kshow.sources.torrenttip import Candidate, TorrenttipSource
 from kshow.torrentfile import info_hash
 from kshow.tvdb import TvdbClient
 
@@ -710,6 +710,32 @@ async def test_not_a_torrent_notifies_once_per_post(db, http, tmp_path):
         "The Wonder Coach S02E04: the download link didn't return a torrent "
         "(신인감독 김연경 2.E04.261101.720p-NEXT). kshow will try another release.",
     )]
+
+
+@respx.mock
+async def test_not_a_torrent_for_unmonitored_episode_promises_no_retry(db, http, tmp_path):
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db)
+    add_episode(db, show_id, 4, monitored=False)
+    deps = make_deps(db, http, tmp_path)
+    sources = {"torrenttip": TorrenttipSource(None, "torrenttip")}
+    sources["torrenttip"].fetch_torrent = lambda url: _html()
+
+    with db() as s:
+        show = s.get(Show, show_id)
+        season = s.get(Season, season_id(db, show_id))
+        c = cand("신인감독 김연경 2.E04.261101.720p-NEXT", f"{SITE}/t/p1.html")
+        await grab_selected(s, deps, show, season, sources, {4: c})
+
+    assert sent(apprise) == [(
+        "Download failed",
+        "The Wonder Coach S02E04: the download link didn't return a torrent "
+        "(신인감독 김연경 2.E04.261101.720p-NEXT).",
+    )]
+
+
+async def _html() -> bytes:
+    return b"<html>ad page</html>"
 
 
 @respx.mock

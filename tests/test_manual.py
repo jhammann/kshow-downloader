@@ -1,6 +1,5 @@
 """One-shot manual search: Search per episode and Search season."""
 
-import json
 from datetime import date, timedelta
 
 import httpx
@@ -8,9 +7,9 @@ import pytest
 import respx
 from sqlalchemy import select
 
-from kshow.db import Episode, Grab, Season, utcnow
+from kshow.db import Episode, Grab, Season, SourceRow, utcnow
 from kshow.downloads import process_downloads
-from kshow.manual import episodes_to_search, search_episodes
+from kshow.manual import episodes_to_search, files_on_disk, search_episodes
 from kshow.pipeline import check_show
 
 # Shared helpers and fixtures (db, http, public_dns, today) from the pipeline tests.
@@ -222,18 +221,73 @@ def test_missing_needs_a_readable_folder_and_no_active_grab(db, season1):
 
 
 @respx.mock
-async def test_episode_search_with_absent_folder_skips_missing(db, http, tmp_path):
+async def test_episode_search_without_tv_dir_skips_missing(db, http, tmp_path):
     show_id = add_show(db)
-    add_season_1(db, show_id)  # no Season 1 folder on disk
+    add_season_1(db, show_id)
     add_episode(db, show_id, 2, season=1, monitored=True, state="downloaded")
     search = mock_pages({1: [("p2", s1(2))]})
     add = mock_qbit()
 
-    await search_episodes(make_deps(db, http, tmp_path), show_id, 1, [2])
+    # /tv not mounted: we can't tell whether the file is gone.
+    await search_episodes(make_deps(db, http, tmp_path / "not-mounted"), show_id, 1, [2])
 
     assert search.call_count == 0
     assert add.call_count == 0
     assert episodes(db, show_id, season=1)[2].state == "downloaded"
+
+
+@pytest.mark.parametrize("existing", ["tv", "show"])
+def test_files_on_disk_absent_season_folder_is_empty(db, tmp_path, existing):
+    tv = tmp_path / "tv"
+    tv.mkdir()
+    if existing == "show":
+        (tv / FOLDER).mkdir()
+    show_id = add_show(db)
+    with db() as s:
+        season = s.get(Season, season_id(db, show_id, 2))
+        assert files_on_disk(tv, season.show, season) == set()
+
+
+def test_files_on_disk_unknown_without_tv_dir_or_readable_show_folder(db, tmp_path):
+    show_id = add_show(db)
+    with db() as s:
+        season = s.get(Season, season_id(db, show_id, 2))
+        assert files_on_disk(tmp_path / "absent", season.show, season) is None
+        show_dir = tmp_path / FOLDER
+        show_dir.mkdir()
+        show_dir.chmod(0)
+        try:
+            assert files_on_disk(tmp_path, season.show, season) is None
+        finally:
+            show_dir.chmod(0o755)
+
+
+def test_files_on_disk_reads_season_folder(db, tmp_path):
+    show_id = add_show(db)
+    folder = tmp_path / FOLDER / "Season 2"
+    folder.mkdir(parents=True)
+    (folder / f"{FOLDER} - S02E03.mkv").write_bytes(b"x")
+    with db() as s:
+        season = s.get(Season, season_id(db, show_id, 2))
+        assert files_on_disk(tmp_path, season.show, season) == {3}
+
+
+@respx.mock
+async def test_episode_search_on_missing_without_season_folder(db, http, tmp_path):
+    """The user deleted the whole season folder: the episode is Missing, not unknown."""
+    show_id = add_show(db)
+    add_season_1(db, show_id)
+    (tmp_path / FOLDER).mkdir()
+    add_episode(db, show_id, 2, season=1, monitored=True, state="downloaded")
+    mock_pages({1: [("p2", s1(2))]})
+    mock_posts("p2")
+    add = mock_qbit()
+    respx.post(APPRISE).respond(200)
+
+    await search_episodes(make_deps(db, http, tmp_path), show_id, 1, [2])
+
+    assert grabbed(add) == [s1(2)]
+    assert episodes(db, show_id, season=1)[2].monitored is False
 
 
 @respx.mock
@@ -310,7 +364,7 @@ async def test_manual_failure_does_not_auto_retry(db, http, tmp_path):
     mock_pages({1: [("p1", s2(1)), ("p1b", s2(1, res="1080p"))]})
     mock_posts("p1", "p1b")
     add = mock_qbit()
-    respx.post(APPRISE).respond(200)
+    apprise = respx.post(APPRISE).respond(200)
     deps = make_deps(db, http, tmp_path)
 
     await search_episodes(deps, show_id, 2, [1])
@@ -330,6 +384,7 @@ async def test_manual_failure_does_not_auto_retry(db, http, tmp_path):
     delete = respx.post(f"{QBIT}/api/v2/torrents/delete").respond(200)
     await process_downloads(deps)
     assert delete.call_count == 1
+    assert sent(apprise)[-1] == ("Download failed", f"Download failed: {FOLDER} S02E01")
     ep = episodes(db, show_id)[1]
     assert (ep.state, ep.monitored) == ("wanted", False)
 
@@ -380,7 +435,27 @@ async def test_manual_search_follows_pages_until_found(db, http, tmp_path, today
     await search_episodes(make_deps(db, http, tmp_path), show_id, 1, None)
 
     assert grabbed(add) == [s1(1)]
-    assert requested_pages(search) == [1, 2, 3]
+    assert requested_pages(search) == [1, 2]  # everything found: no page 3
+
+
+@respx.mock
+async def test_pages_continue_until_every_target_is_found(db, http, tmp_path, today, season1):
+    show_id, _ = season1
+    for n in (1, 2):
+        add_episode(db, show_id, n, season=1, monitored=False, tvdb_airdate=date(2025, 10, 5))
+    search = mock_pages({
+        1: [("p1", s1(1)), ("s2", s2(2))],  # E2 of season 2 doesn't count
+        2: [("p2", s1(2))],
+        3: [("d", s1(6))],
+    })
+    mock_posts("p1", "p2")
+    add = mock_qbit()
+    respx.post(APPRISE).respond(200)
+
+    await search_episodes(make_deps(db, http, tmp_path), show_id, 1, None)
+
+    assert grabbed(add) == [s1(1), s1(2)]
+    assert requested_pages(search) == [1, 2]
 
 
 @respx.mock
@@ -425,22 +500,30 @@ async def test_automatic_check_reads_one_page(db, http, tmp_path):
     assert requested_pages(search) == [1]
 
 
-@respx.mock
-async def test_unreachable_on_a_later_page_keeps_earlier_results(
-    db, http, tmp_path, today, season1
-):
-    show_id, _ = season1
-    add_episode(db, show_id, 1, season=1, monitored=False, tvdb_airdate=date(2025, 10, 5))
+def mock_dead_site(first_page: list[tuple[str, str]] | None):
+    """The search answers page 1 with first_page (or fails when None); later pages and every
+    probed neighbouring domain fail."""
 
     def respond(request: httpx.Request) -> httpx.Response:
-        if request.url.params.get("page"):
+        if first_page is None or request.url.params.get("page"):
             raise httpx.ConnectError("down")
-        return httpx.Response(200, text=page_html([("p1", s1(1))]))
+        return httpx.Response(200, text=page_html(first_page))
 
-    respx.get(url__regex=r"https://torrenttip\d+\.top/search").mock(side_effect=respond)
+    route = respx.get(url__regex=r"https://torrenttip\d+\.top/search").mock(side_effect=respond)
     respx.get(url__regex=r"https://torrenttip\d+\.top/$").mock(
         side_effect=httpx.ConnectError("down")
     )
+    return route
+
+
+@respx.mock
+async def test_failure_on_a_later_page_keeps_earlier_results_quietly(
+    db, http, tmp_path, today, season1
+):
+    show_id, _ = season1
+    for n in (1, 2):
+        add_episode(db, show_id, n, season=1, monitored=False, tvdb_airdate=date(2025, 10, 5))
+    mock_dead_site([("p1", s1(1))])
     mock_posts("p1")
     add = mock_qbit()
     apprise = respx.post(APPRISE).respond(200)
@@ -448,7 +531,33 @@ async def test_unreachable_on_a_later_page_keeps_earlier_results(
     await search_episodes(make_deps(db, http, tmp_path), show_id, 1, None)
 
     assert grabbed(add) == [s1(1)]
-    titles = [t for t, _ in sent(apprise)]
-    assert "Source unreachable" in titles
-    assert "No release found" not in titles
-    assert json.loads(apprise.calls[0].request.content)["title"] == "Source unreachable"
+    assert sent(apprise) == [
+        ("Download started", f"{FOLDER} S01E01 (720p-NEXT)"),
+        ("No release found", f"No release found for {FOLDER} S01E02"),
+    ]
+    with db() as s:
+        assert s.scalar(select(SourceRow)).unreachable_since is None
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("numbers", "label"), [(None, f"{FOLDER} S01"), ([2], f"{FOLDER} S01E02")]
+)
+async def test_no_source_reachable_sends_one_search_failed(
+    db, http, tmp_path, today, season1, numbers, label
+):
+    show_id, _ = season1
+    for n in (1, 2):
+        add_episode(db, show_id, n, season=1, monitored=False, tvdb_airdate=date(2025, 10, 5))
+    mock_dead_site(None)
+    add = mock_qbit()
+    apprise = respx.post(APPRISE).respond(200)
+
+    await search_episodes(make_deps(db, http, tmp_path), show_id, 1, numbers)
+
+    assert add.call_count == 0
+    assert sent(apprise) == [
+        ("Source unreachable", "torrenttip is unreachable"),
+        ("Search failed",
+         f"Couldn't search for {label}: no source is reachable right now. Try again later."),
+    ]
