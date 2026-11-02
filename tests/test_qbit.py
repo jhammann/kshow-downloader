@@ -68,6 +68,33 @@ async def test_bad_credentials_raise(client):
 
 
 @respx.mock
+async def test_login_accepts_qbittorrent_5_no_content_reply(client):
+    # qBittorrent 5.x answers a successful login with 204 and an empty body (seen live on 5.3.0)
+    respx.post(f"{API}/auth/login").mock(
+        return_value=httpx.Response(204, headers={"Set-Cookie": "SID=v5; path=/"})
+    )
+    info = respx.get(f"{API}/torrents/info").mock(return_value=httpx.Response(200, json=[]))
+    assert await client.torrents("kshow") == []
+    assert info.calls[0].request.headers["cookie"] == "SID=v5"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        httpx.Response(401),  # 5.x: wrong credentials
+        httpx.Response(403),  # banned after too many failures
+        httpx.Response(200, text="Fails."),  # 4.x: wrong credentials
+        httpx.Response(204),  # success status but no session cookie
+    ],
+)
+@respx.mock
+async def test_login_failures_raise(client, reply):
+    respx.post(f"{API}/auth/login").mock(return_value=reply)
+    with pytest.raises(QbitError):
+        await client.torrents("kshow")
+
+
+@respx.mock
 async def test_relogin_once_on_403(client):
     login = respx.post(f"{API}/auth/login").mock(
         side_effect=[login_ok("old"), login_ok("new")]

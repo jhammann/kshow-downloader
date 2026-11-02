@@ -57,8 +57,10 @@ class QbitClient:
             "/auth/login",
             data={"username": self._username, "password": self._password},
         )
-        if resp.status_code != 200 or resp.text.strip() != "Ok.":
-            raise QbitError("qBittorrent login failed")
+        # qBittorrent 4.x replies 200 "Ok." (or "Fails."); 5.x replies 204 with no body (401 on
+        # bad credentials). Either way a real login hands out a SID cookie, checked below.
+        if not resp.is_success or resp.text.strip() not in ("Ok.", ""):
+            raise QbitError(f"qBittorrent login failed (HTTP {resp.status_code})")
         sid = resp.cookies.get("SID")
         if not sid:
             raise QbitError("qBittorrent login returned no SID cookie")
