@@ -1511,3 +1511,59 @@ async def test_not_a_torrent_promises_a_retry_only_when_kshow_retries(
         "(신인감독 김연경 2.E04.261101.720p-NEXT)."
         + (" kshow will try another release." if promise else ""),
     )]
+
+
+@respx.mock
+async def test_seasons_unknown_at_add_are_followed_from_the_add_date(db, http, tmp_path, today):
+    """TVDB failed while the show was added: seasons above the picked one already existed
+    then, so they are followed from the add date, without the 14-day grace or a "New season"
+    notification."""
+    from datetime import datetime
+
+    mock_tvdb(77, [
+        (1, 1, date(2025, 10, 5)),
+        (3, 1, date(2026, 9, 28)),   # before the add
+        (3, 2, date(2026, 10, 25)),  # after the add, before the 14-day grace
+        (3, 3, date(2026, 11, 9)),
+    ])
+    mock_search()
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db, tvdb_id=77)
+    with db() as s:
+        show = s.get(Show, show_id)
+        show.added_at = datetime(2026, 10, 1, 20, 0)  # UTC: 2 October in Korea
+        show.seasons_unknown_at_add = True
+        s.commit()
+    deps = make_deps(db, http, tmp_path, tvdb=True)
+
+    await check_show(deps, show_id)
+
+    by_number = seasons(db, show_id)
+    assert by_number[1].followed is False
+    assert by_number[3].followed is True
+    assert by_number[3].followed_since == date(2026, 10, 2)
+    assert {n: e.monitored for n, e in episodes(db, show_id, season=3).items()} == {
+        1: False, 2: True, 3: True,
+    }
+    assert [m for m in sent(apprise) if m[0] == "New season"] == []
+    with db() as s:
+        show = s.get(Show, show_id)
+        assert show.seasons_unknown_at_add is False
+        assert show.max_known_season == 3
+
+
+@respx.mock
+async def test_seasons_unknown_at_add_flag_kept_while_tvdb_fails(db, http, tmp_path, today):
+    respx.post(f"{TVDB}/login").respond(200, json={"data": {"token": "t"}})
+    respx.get(f"{TVDB}/series/77/episodes/default").respond(500)
+    mock_search()
+    respx.post(APPRISE).respond(200)
+    show_id = add_show(db, tvdb_id=77)
+    with db() as s:
+        s.get(Show, show_id).seasons_unknown_at_add = True
+        s.commit()
+
+    await check_show(make_deps(db, http, tmp_path, tvdb=True), show_id)
+
+    with db() as s:
+        assert s.get(Show, show_id).seasons_unknown_at_add is True

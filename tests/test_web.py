@@ -402,6 +402,7 @@ def test_add_flow(client, settings, triggered, today):
     assert show.search_title == "신인감독 김연경"
     assert show.tvdb_id == 123
     assert show.max_known_season == 2
+    assert not show.seasons_unknown_at_add
     assert sorted(seasons) == [1, 2]
     assert seasons[1].followed is False and seasons[1].followed_since is None
     assert seasons[2].followed is True and seasons[2].followed_since == today
@@ -441,6 +442,8 @@ def test_add_falls_back_to_the_picked_season_when_tvdb_fails(client, triggered, 
         show = s.scalar(select(Show))
         seasons = s.scalars(select(Season)).all()
     assert show.tvdb_id == 123 and show.max_known_season == 2
+    # the first successful sync adopts TVDB's seasons as known at the add
+    assert show.seasons_unknown_at_add is True
     assert [(x.number, x.followed, x.followed_since) for x in seasons] == [(2, True, today)]
     assert "TVDB" in caplog.text
     assert triggered == [show.id]

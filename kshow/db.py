@@ -36,6 +36,10 @@ class Show(Base):
     # Highest season number known when the show was added (or migrated, or last synced). A
     # TVDB season above it is "new" and gets followed automatically; lower ones never are.
     max_known_season: Mapped[int] = mapped_column(default=0)
+    # TVDB couldn't list the seasons when the show was added. The first successful sync then
+    # treats the seasons above the picked one as known at the add (followed from the add
+    # date, not announced) and clears this.
+    seasons_unknown_at_add: Mapped[bool | None]
 
     seasons: Mapped[list["Season"]] = relationship(
         back_populates="show", order_by="Season.number"

@@ -171,12 +171,14 @@ def test_init_db_adds_missing_nullable_columns_to_existing_db(tmp_path):
         show = s.get(Show, 1)
         assert show.folder_name == "Hangout" and show.tvdb_id == 5
         assert show.poster_url is None
+        assert show.seasons_unknown_at_add is None
         show.poster_url = "https://artworks.thetvdb.com/p.jpg"
         s.commit()
     con = sqlite3.connect(path)
     cols = [row[1] for row in con.execute("PRAGMA table_info(shows)")]
     con.close()
     assert cols.count("poster_url") == 1
+    assert cols.count("seasons_unknown_at_add") == 1
 
 
 def test_today_kst_is_the_date_in_seoul(monkeypatch):
@@ -192,3 +194,12 @@ def test_today_kst_is_the_date_in_seoul(monkeypatch):
 
     monkeypatch.setattr(clock, "datetime", FakeDatetime)
     assert clock.today_kst() == date(2026, 11, 2)
+
+
+def test_kst_date_of_a_utc_timestamp():
+    from datetime import date, datetime
+
+    from kshow import clock
+
+    assert clock.kst_date(datetime(2026, 11, 1, 14, 59)) == date(2026, 11, 1)
+    assert clock.kst_date(datetime(2026, 11, 1, 15, 0)) == date(2026, 11, 2)

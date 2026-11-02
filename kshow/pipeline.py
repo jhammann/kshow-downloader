@@ -117,8 +117,10 @@ async def sync_seasons(session: Session, deps: Deps, show: Show) -> bool:
     """Create seasons and episodes TVDB lists; return whether TVDB answered.
 
     A season above show.max_known_season is new and followed from 14 days before today. Lower
-    seasons are created unfollowed. Only new episode rows get `monitored` set; existing rows
-    keep theirs and only get their air date refreshed.
+    seasons are created unfollowed. When TVDB couldn't list the seasons at the add
+    (show.seasons_unknown_at_add), the first answer's higher seasons existed at the add: they
+    are followed from the add date and not announced. Only new episode rows get `monitored`
+    set; existing rows keep theirs and only get their air date refreshed.
     """
     if show.tvdb_id is None or deps.tvdb is None:
         return False
@@ -131,6 +133,10 @@ async def sync_seasons(session: Session, deps: Deps, show: Show) -> bool:
     for t in tvdb_eps:
         by_season.setdefault(t.season, []).append(t)
     existing = {s.number: s for s in show.seasons}
+    at_add = bool(show.seasons_unknown_at_add)
+    since = (
+        clock.kst_date(show.added_at) if at_add else clock.today_kst() - NEW_SEASON_GRACE
+    )
     announced: list[int] = []
     for number in sorted(by_season):
         season = existing.get(number)
@@ -142,11 +148,11 @@ async def sync_seasons(session: Session, deps: Deps, show: Show) -> bool:
                 release_season=number,
                 folder=season_folder_name(deps.settings.tv_dir / show.folder_name, number),
                 followed=new,
-                followed_since=clock.today_kst() - NEW_SEASON_GRACE if new else None,
+                followed_since=since if new else None,
             )
             session.add(season)
             session.flush()
-            if new:
+            if new and not at_add:
                 announced.append(number)
         known = {
             e.number: e
@@ -168,6 +174,8 @@ async def sync_seasons(session: Session, deps: Deps, show: Show) -> bool:
             season.first_aired = min(aired)
     if by_season:
         show.max_known_season = max(show.max_known_season, max(by_season))
+    if at_add:
+        show.seasons_unknown_at_add = False
     session.commit()
     session.refresh(show)
     for number in announced:

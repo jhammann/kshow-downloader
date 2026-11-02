@@ -589,7 +589,8 @@ async def add_show(request: Request):
                 return _redirect(f"/shows/{dup.id}")
         if errors:
             return _render_confirm(request, form, errors=errors, status_code=400)
-        if tvdb_id is not None and tvdb_seasons is None:
+        seasons_unknown = tvdb_id is not None and tvdb_seasons is None
+        if seasons_unknown:
             log.warning(
                 "TVDB seasons unavailable while adding %s; following only season %d for now",
                 folder,
@@ -604,6 +605,7 @@ async def add_show(request: Request):
             folder_name=folder,
             poster_url=poster,
             max_known_season=max(numbers),
+            seasons_unknown_at_add=seasons_unknown,
         )
         session.add(show)
         session.flush()
