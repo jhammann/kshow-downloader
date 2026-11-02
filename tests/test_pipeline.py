@@ -668,7 +668,9 @@ REJECTED = (
     ],
 )
 async def test_qbit_rejection_is_not_an_outage_and_moves_on(db, http, tmp_path, rejection):
-    mock_search("신인감독 김연경 2.E04.261101.720p-NEXT", "신인감독 김연경 2.E04.261101.720p-ODD")
+    mock_search(
+        "신인감독 김연경 2.E04.261101.720p-NEXT", "신인감독 김연경 2.E04.261101.720p-ODD"
+    )
     mock_post(1)
     mock_post(2)
     respx.post(f"{QBIT}/api/v2/auth/login").respond(
@@ -705,6 +707,7 @@ async def test_outage_then_rejection_on_same_post_notifies_rejection_once(db, ht
         ]
     )
     respx.post(f"{QBIT}/api/v2/torrents/add").respond(200, text="Fails.")
+    respx.get(f"{QBIT}/api/v2/torrents/info").respond(200, json=[])  # not added after all
     apprise = respx.post(APPRISE).respond(200)
     show_id = add_show(db)
     deps = make_deps(db, http, tmp_path)
@@ -738,3 +741,92 @@ async def test_qbit_rejection_ends_an_outage(db, http, tmp_path):
     assert [t for t, _ in sent(apprise)] == ["qBittorrent back", "Download failed"]
     with db() as s:
         assert get_setting(s, "qbit_outage_since") == ""
+
+
+def mock_timeout_then_409(listing):
+    """First add times out, the retried add of the same grab gets 409 (already there)."""
+    respx.post(f"{QBIT}/api/v2/auth/login").respond(
+        200, text="Ok.", headers={"Set-Cookie": "SID=abc; path=/"}
+    )
+    add = respx.post(f"{QBIT}/api/v2/torrents/add").mock(
+        side_effect=[httpx.ReadTimeout("slow"), httpx.Response(409, text="Fails.")]
+    )
+    info = respx.get(f"{QBIT}/api/v2/torrents/info")
+    if isinstance(listing, Exception):
+        info.mock(side_effect=listing)
+    else:
+        info.respond(200, json=listing)
+    return add
+
+
+def listed(tag):
+    return {"hash": "a" * 40, "tags": tag, "progress": 0.1, "state": "downloading",
+            "save_path": "/downloads/kshow"}
+
+
+@respx.mock
+async def test_reused_grab_rejected_but_present_is_adopted(db, http, tmp_path):
+    mock_search(
+        "신인감독 김연경 2.E04.261101.720p-NEXT", "신인감독 김연경 2.E04.261101.720p-ODD"
+    )
+    mock_post(1)
+    mock_post(2)
+    add = mock_timeout_then_409([listed("kshow-1")])
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db)
+    deps = make_deps(db, http, tmp_path)
+
+    for _ in range(3):
+        await check_show(deps, show_id)
+
+    assert add.call_count == 2
+    with db() as s:
+        grab = s.scalars(select(Grab)).one()
+        assert (grab.qbit_tag, grab.state) == ("kshow-1", "downloading")
+    assert episodes(db, show_id)[4].state == "downloading"
+    assert sent(apprise) == [
+        sent(apprise)[0],  # the timeout started an outage
+        ("qBittorrent back", "kshow can reach qBittorrent again."),
+        ("Download started", "The Wonder Coach S02E04 (720p-NEXT)"),
+    ]
+    assert sent(apprise)[0][0] == "qBittorrent problem"
+
+
+@respx.mock
+async def test_reused_grab_rejected_and_absent_fails_once(db, http, tmp_path):
+    mock_search("신인감독 김연경 2.E04.261101.720p-NEXT")
+    mock_post(1)
+    add = mock_timeout_then_409([])
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db)
+    deps = make_deps(db, http, tmp_path)
+
+    for _ in range(3):
+        await check_show(deps, show_id)
+
+    assert add.call_count == 2
+    assert [t for t, _ in sent(apprise)] == [
+        "qBittorrent problem", "qBittorrent back", "Download failed",
+    ]
+    assert sent(apprise)[2][1] == REJECTED[0].format("NEXT")
+    with db() as s:
+        assert s.scalars(select(Grab)).one().state == "failed"
+    assert episodes(db, show_id)[4].state == "wanted"
+
+
+@respx.mock
+async def test_reused_grab_lookup_failure_keeps_add_failed(db, http, tmp_path):
+    mock_search("신인감독 김연경 2.E04.261101.720p-NEXT")
+    mock_post(1)
+    mock_timeout_then_409(httpx.ConnectError("gone"))
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db)
+    deps = make_deps(db, http, tmp_path)
+
+    await check_show(deps, show_id)
+    await check_show(deps, show_id)
+
+    assert [t for t, _ in sent(apprise)] == ["qBittorrent problem"]
+    with db() as s:
+        assert s.scalars(select(Grab)).one().state == "add_failed"
+        assert get_setting(s, "qbit_outage_since") != ""

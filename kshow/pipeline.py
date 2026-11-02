@@ -195,6 +195,7 @@ async def _grab(
             )
             .order_by(Grab.id.desc())
         )
+        reused = grab is not None
         if grab is None:
             # Commit the grab (and its tag) before qBittorrent sees it, so a tag that may
             # exist in qBittorrent always belongs to a persisted grab and is never reused.
@@ -214,24 +215,39 @@ async def _grab(
                 tag=grab.qbit_tag,
             )
         except QbitRejected as e:
-            # qBittorrent is up and added nothing: mark the post failed so the next check
-            # moves on to another release.
             log.warning("qBittorrent rejected %s: %s", c.release.raw, e)
-            grab.state = "failed"
-            session.commit()
+            if reused:
+                # An earlier add may have timed out yet succeeded; qBittorrent then rejects
+                # the retry as a duplicate. Adopt the torrent if it carries our tag.
+                try:
+                    present = any(
+                        grab.qbit_tag in t.tags for t in await deps.qbit.torrents(category)
+                    )
+                except QbitError as err:
+                    log.warning("qBittorrent lookup failed for %s: %s", grab.qbit_tag, err)
+                    await qbit_failed(session, deps.notifier, err)
+                    return
+            else:
+                present = False
             await qbit_ok(session, deps.notifier)
-            await deps.notifier.send(
-                "Download failed",
-                f"{label}: qBittorrent rejected the torrent ({c.release.raw}).",
-            )
-            continue
+            if not present:
+                # Nothing was added: fail the post so the next check tries another release.
+                grab.state = "failed"
+                session.commit()
+                await deps.notifier.send(
+                    "Download failed",
+                    f"{label}: qBittorrent rejected the torrent ({c.release.raw}).",
+                )
+                continue
+            log.info("torrent %s was added after all; adopting it", grab.qbit_tag)
         except QbitError as e:
             log.warning("qBittorrent add failed, stopping grabs for %s: %s", show.folder_name, e)
             grab.state = "add_failed"
             session.commit()
             await qbit_failed(session, deps.notifier, e)
             return
-        await qbit_ok(session, deps.notifier)
+        else:
+            await qbit_ok(session, deps.notifier)
         grab.state = "downloading"
         grab.release_name = c.release.raw
         grab.progress = 0

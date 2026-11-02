@@ -6,6 +6,7 @@ a conditional UPDATE, so of two concurrent runs only the one that flips the flag
 """
 
 from sqlalchemy import update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from kshow.db import Setting, utcnow
@@ -30,13 +31,22 @@ def _flip(session: Session, outage: bool) -> bool:
     else:
         in_other_state, new_value = Setting.value != "", ""
     result = session.execute(
-        update(Setting)
-        .where(Setting.key == KEY, in_other_state)
-        .values(value=new_value)
-        .execution_options(synchronize_session=False)
+        update(Setting).where(Setting.key == KEY, in_other_state).values(value=new_value)
     )
     session.commit()
-    return result.rowcount == 1
+    if result.rowcount == 1:
+        return True
+    if session.get(Setting, KEY) is not None:
+        return False
+    # The row is gone (it is normally seeded at startup): recreate it so outages still
+    # notify. A missing row means "no outage", so only starting one counts as a change.
+    session.add(Setting(key=KEY, value=new_value))
+    try:
+        session.commit()
+    except IntegrityError:  # a concurrent run recreated it first
+        session.rollback()
+        return False
+    return outage
 
 
 async def qbit_failed(session: Session, notifier: Notifier, error: Exception) -> None:
