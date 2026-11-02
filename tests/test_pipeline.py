@@ -1447,3 +1447,29 @@ async def test_check_skips_release_dated_far_from_the_episode_air_date(db, http,
 
     assert add.call_count == 1
     assert "2.E04.261026.1080p-NEXT.torrent" in add.calls.last.request.content.decode()
+
+
+@respx.mock
+async def test_stop_during_the_finished_check_is_kept(db, http, tmp_path):
+    """The user taps Stop while the check waits for TVDB's status: Stop wins."""
+    season = tmp_path / "The Wonder Coach" / "Season 2"
+    season.mkdir(parents=True)
+    (season / "The Wonder Coach - S02E01.mkv").write_bytes(b"x")
+    mock_tvdb(77, [(1, date(2026, 10, 11))], status="Ended")
+    mock_search()
+    show_id = add_show(db, tvdb_id=77)
+    deps = make_deps(db, http, tmp_path, tvdb=True)
+    is_ended = deps.tvdb.is_ended
+
+    async def stop_then_answer(tvdb_id):
+        with db() as s:
+            s.get(Show, show_id).status = "stopped"
+            s.commit()
+        return await is_ended(tvdb_id)
+
+    deps.tvdb.is_ended = stop_then_answer
+
+    await check_show(deps, show_id)
+
+    with db() as s:
+        assert s.get(Show, show_id).status == "stopped"

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from kshow import clock
@@ -563,9 +563,15 @@ async def check_show(deps: Deps, show_id: int) -> None:
                     log.warning("TVDB status check failed for %s: %s", show.folder_name, e)
                     ended = False
                 if ended:
-                    show.status = "finished"
+                    # Only while still following: the user may have tapped Stop meanwhile.
+                    finished = session.execute(
+                        update(Show)
+                        .where(Show.id == show.id, Show.status == "following")
+                        .values(status="finished")
+                    ).rowcount
                     session.commit()
-                    log.info("%s finished", show.folder_name)
+                    if finished:
+                        log.info("%s finished", show.folder_name)
 
 
 async def _revive_if_new_season(deps: Deps, show_id: int) -> None:
