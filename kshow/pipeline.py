@@ -55,8 +55,14 @@ def select_releases(
     wanted: set[int],
     season_first_aired: date | None,
     preferred_resolution: str,
+    airdates: dict[int, date | None] | None = None,
 ) -> dict[int, Candidate]:
-    """Best candidate per wanted episode of exactly this title and season."""
+    """Best candidate per wanted episode of exactly this title and season.
+
+    `airdates` maps episode numbers to their TVDB air dates. A dated release for a dated
+    episode must have aired within AIRDATE_TOLERANCE of it: a later season's release named
+    without its season number parses as season 1 and would otherwise fill the wrong episode.
+    """
     title = normalize_title(search_title)
     best: dict[int, tuple[tuple, Candidate]] = {}
     for index, c in enumerate(candidates):
@@ -69,6 +75,13 @@ def select_releases(
             season_first_aired is not None
             and r.airdate is not None
             and r.airdate < season_first_aired - AIRDATE_TOLERANCE
+        ):
+            continue
+        aired = (airdates or {}).get(r.episode)
+        if (
+            aired is not None
+            and r.airdate is not None
+            and abs(r.airdate - aired) > AIRDATE_TOLERANCE
         ):
             continue
         key = (
@@ -420,6 +433,15 @@ def _wanted(
     return wanted
 
 
+def episode_airdates(session: Session, season: Season) -> dict[int, date | None]:
+    """TVDB air date per episode of this season, for select_releases."""
+    return dict(
+        session.execute(
+            select(Episode.number, Episode.tvdb_airdate).where(Episode.season_id == season.id)
+        ).all()
+    )
+
+
 def _too_old(season: Season, undated: set[int], c: Candidate) -> bool:
     """A release for an episode without a TVDB air date that aired before the season was
     followed: an old episode TVDB lists undated, which is left for manual search."""
@@ -491,6 +513,7 @@ async def check_show(deps: Deps, show_id: int) -> None:
                     wanted,
                     season.first_aired,
                     preferred,
+                    episode_airdates(session, season),
                 )
                 await grab_selected(
                     session, deps, show, season, {s.name: s for s in sources}, selected

@@ -77,6 +77,36 @@ def test_airdate_guard():
     assert select_releases([ok], TITLE, 2, {4}, first, "720p")[4] is ok
 
 
+def test_episode_airdate_guard_rejects_release_of_another_season():
+    """A season-2 release named without a season marker parses as season 1; its air date
+    gives it away."""
+    s2_unmarked = cand("신인감독 김연경.E03.260915.720p-NEXT", "s2")
+    s1 = cand("신인감독 김연경.E03.251021.720p-NEXT", "s1")
+    airdates = {3: date(2025, 10, 19)}
+    assert select_releases([s2_unmarked], TITLE, 1, {3}, None, "720p", airdates) == {}
+    assert select_releases([s2_unmarked, s1], TITLE, 1, {3}, None, "720p", airdates)[3] is s1
+
+
+def test_episode_airdate_guard_tolerates_a_week_either_way():
+    airdates = {3: date(2025, 10, 19)}
+    early = cand("신인감독 김연경.E03.251012.720p-NEXT", "early")
+    late = cand("신인감독 김연경.E03.251026.720p-NEXT", "late")
+    too_late = cand("신인감독 김연경.E03.251027.720p-NEXT", "too-late")
+    assert select_releases([early], TITLE, 1, {3}, None, "720p", airdates)[3] is early
+    assert select_releases([late], TITLE, 1, {3}, None, "720p", airdates)[3] is late
+    assert select_releases([too_late], TITLE, 1, {3}, None, "720p", airdates) == {}
+
+
+def test_episode_airdate_guard_skips_undated_episodes_and_releases():
+    s2_unmarked = cand("신인감독 김연경.E03.260915.720p-NEXT", "s2")
+    undated = cand("신인감독 김연경.E03.260231.720p-NEXT", "undated")  # no valid date
+    assert select_releases([s2_unmarked], TITLE, 1, {3}, None, "720p", {3: None})[3] is s2_unmarked
+    assert select_releases([s2_unmarked], TITLE, 1, {3}, None, "720p", {})[3] is s2_unmarked
+    assert select_releases([s2_unmarked], TITLE, 1, {3}, None, "720p")[3] is s2_unmarked
+    airdates = {3: date(2025, 10, 19)}
+    assert select_releases([undated], TITLE, 1, {3}, None, "720p", airdates)[3] is undated
+
+
 # ---- check_show ----
 
 
@@ -1398,3 +1428,22 @@ async def test_finished_show_without_new_season_stays_finished(db, http, tmp_pat
         assert s.scalar(select(Show).where(Show.folder_name == "X")).status == "finished"
     assert sorted(seasons(db, show_id)) == [2]
     assert not search.called and not apprise.called
+
+
+@respx.mock
+async def test_check_skips_release_dated_far_from_the_episode_air_date(db, http, tmp_path):
+    mock_search(
+        "신인감독 김연경 2.E04.261220.720p-NEXT",  # another season's E04, wrongly named
+        "신인감독 김연경 2.E04.261026.1080p-NEXT",
+    )
+    mock_post(1)
+    mock_post(2)
+    add = mock_qbit()
+    respx.post(APPRISE).respond(200)
+    show_id = add_show(db)
+    add_episode(db, show_id, 4, tvdb_airdate=date(2026, 10, 25))
+
+    await check_show(make_deps(db, http, tmp_path), show_id)
+
+    assert add.call_count == 1
+    assert "2.E04.261026.1080p-NEXT.torrent" in add.calls.last.request.content.decode()

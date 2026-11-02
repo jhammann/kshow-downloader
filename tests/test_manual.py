@@ -421,7 +421,7 @@ async def test_season_1_search_ignores_season_2_releases(db, http, tmp_path, tod
 @respx.mock
 async def test_manual_search_follows_pages_until_found(db, http, tmp_path, today, season1):
     show_id, _ = season1
-    add_episode(db, show_id, 1, season=1, monitored=False, tvdb_airdate=date(2025, 10, 5))
+    add_episode(db, show_id, 1, season=1, monitored=False, tvdb_airdate=date(2025, 10, 19))
     search = mock_pages({
         1: [("a", s1(9)), ("b", s1(8))],
         2: [("c", s1(7)), ("p1", s1(1))],
@@ -442,7 +442,7 @@ async def test_manual_search_follows_pages_until_found(db, http, tmp_path, today
 async def test_pages_continue_until_every_target_is_found(db, http, tmp_path, today, season1):
     show_id, _ = season1
     for n in (1, 2):
-        add_episode(db, show_id, n, season=1, monitored=False, tvdb_airdate=date(2025, 10, 5))
+        add_episode(db, show_id, n, season=1, monitored=False, tvdb_airdate=date(2025, 10, 19))
     search = mock_pages({
         1: [("p1", s1(1)), ("s2", s2(2))],  # E2 of season 2 doesn't count
         2: [("p2", s1(2))],
@@ -522,7 +522,7 @@ async def test_failure_on_a_later_page_keeps_earlier_results_quietly(
 ):
     show_id, _ = season1
     for n in (1, 2):
-        add_episode(db, show_id, n, season=1, monitored=False, tvdb_airdate=date(2025, 10, 5))
+        add_episode(db, show_id, n, season=1, monitored=False, tvdb_airdate=date(2025, 10, 19))
     mock_dead_site([("p1", s1(1))])
     mock_posts("p1")
     add = mock_qbit()
@@ -560,4 +560,41 @@ async def test_no_source_reachable_sends_one_search_failed(
         ("Source unreachable", "torrenttip is unreachable"),
         ("Search failed",
          f"Couldn't search for {label}: no source is reachable right now. Try again later."),
+    ]
+
+
+@respx.mock
+async def test_episode_search_skips_other_season_release_without_season_marker(
+    db, http, tmp_path, season1
+):
+    """A season-2 release named without " 2" parses as season 1; its air date is far from
+    S01E03's, so it is not filed as S01E03."""
+    show_id, _ = season1
+    add_episode(db, show_id, 3, season=1, monitored=False, tvdb_airdate=date(2025, 10, 19))
+    mock_pages({1: [("wrong", s1(3, "260915")), ("right", s1(3, "251019", "1080p"))]})
+    mock_posts("wrong", "right")
+    add = mock_qbit()
+    respx.post(APPRISE).respond(200)
+
+    await search_episodes(make_deps(db, http, tmp_path), show_id, 1, [3])
+
+    assert grabbed(add) == [s1(3, "251019", "1080p")]
+
+
+@respx.mock
+async def test_episode_search_without_wrong_season_release_finds_nothing(
+    db, http, tmp_path, season1
+):
+    show_id, _ = season1
+    add_episode(db, show_id, 3, season=1, monitored=False, tvdb_airdate=date(2025, 10, 19))
+    mock_pages({1: [("wrong", s1(3, "260915"))]})
+    mock_posts("wrong")
+    add = mock_qbit()
+    apprise = respx.post(APPRISE).respond(200)
+
+    await search_episodes(make_deps(db, http, tmp_path), show_id, 1, [3])
+
+    assert add.call_count == 0
+    assert sent(apprise) == [
+        ("No release found", "No release found for The Wonder Coach S01E03")
     ]

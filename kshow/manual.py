@@ -18,6 +18,7 @@ from kshow.library import existing_episodes
 from kshow.pipeline import (
     Deps,
     _episode,
+    episode_airdates,
     grab_selected,
     search_candidates,
     select_releases,
@@ -184,6 +185,7 @@ async def search_episodes(
             wanted,
             season.first_aired,
             get_setting(session, "preferred_resolution"),
+            episode_airdates(session, season),
         )
         await grab_selected(
             session, deps, show, season, {s.name: s for s in sources}, selected
