@@ -1,5 +1,6 @@
 """Phone-first web UI: show list, add flow, show detail and settings."""
 
+import asyncio
 import logging
 import math
 import os
@@ -540,10 +541,25 @@ async def add_show(request: Request):
 # --- show detail ------------------------------------------------------------------
 
 
-def _files_on_disk(request: Request, show: Show) -> set[int]:
-    """Episode numbers whose video file is in the show's season folder."""
+def _scan_season(season_dir: Path, season: int) -> set[int] | None:
+    if not season_dir.is_dir():
+        return None  # e.g. /tv not mounted: we can't tell which files are gone
+    return existing_episodes(season_dir, season)
+
+
+async def _files_on_disk(request: Request, show: Show) -> set[int] | None:
+    """Episode numbers whose video file is in the show's season folder; None when unknown."""
     tv_dir = request.app.state.settings.tv_dir
-    return existing_episodes(tv_dir / show.folder_name / show.season_folder, show.tvdb_season)
+    season_dir = tv_dir / show.folder_name / show.season_folder
+    try:
+        return await asyncio.to_thread(_scan_season, season_dir, show.tvdb_season)
+    except OSError as e:
+        log.warning("cannot read %s: %s", season_dir, e)
+        return None
+
+
+def _is_missing(ep: Episode, on_disk: set[int] | None) -> bool:
+    return ep.state == "downloaded" and on_disk is not None and ep.number not in on_disk
 
 
 @router.get("/shows/{show_id}", response_class=HTMLResponse)
@@ -559,12 +575,12 @@ async def show_detail(request: Request, show_id: int):
             .order_by(Grab.id)
         ).all()
     latest = {g.episode_id: g for g in grabs}  # ordered by id, so the last one wins
-    on_disk = _files_on_disk(request, show)
+    on_disk = await _files_on_disk(request, show)
     rows = [
         {
             "ep": e,
             "grab": latest.get(e.id),
-            "missing": e.state == "downloaded" and e.number not in on_disk,
+            "missing": _is_missing(e, on_disk),
         }
         for e in episodes
     ]
@@ -598,7 +614,15 @@ async def episode_retry(request: Request, show_id: int, number: int):
         if ep is None:
             raise HTTPException(status_code=404, detail="Episode not found")
         # A downloaded episode whose file was deleted can be downloaded again (by hand only).
-        missing = ep.state == "downloaded" and number not in _files_on_disk(request, show)
+        missing = (
+            ep.state == "downloaded"
+            and show.status == "following"
+            and _is_missing(ep, await _files_on_disk(request, show))
+            and session.scalar(
+                select(Grab.id).where(Grab.episode_id == ep.id, Grab.state == "downloading")
+            )
+            is None
+        )
         if ep.state not in ("wanted", "failed") and not missing:
             return _redirect(f"/shows/{show_id}")
         ep.state = "wanted"

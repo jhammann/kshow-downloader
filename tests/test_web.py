@@ -924,3 +924,65 @@ def test_download_again_ignores_present_file(client, settings, triggered):
         assert ep.state == "downloaded"
         assert len(s.scalars(select(Grab).where(Grab.episode_id == ep.id)).all()) == 3
     assert triggered == []
+
+
+def test_download_again_leaves_episode_with_active_grab(client, settings, triggered):
+    show_id = _downloaded_eps(client, settings)
+    with _session(client) as s:
+        ep = s.scalar(select(Episode).where(Episode.number == 4))
+        s.add(Grab(episode_id=ep.id, post_url="active", release_name="r",
+                   qbit_tag="kshow-99", state="downloading"))
+        s.commit()
+    r = client.post(f"/shows/{show_id}/episodes/4/retry")
+    assert r.status_code == 303 and r.headers["location"] == f"/shows/{show_id}"
+    with _session(client) as s:
+        ep = s.scalar(select(Episode).where(Episode.number == 4))
+        assert ep.state == "downloaded"
+        assert len(s.scalars(select(Grab).where(Grab.episode_id == ep.id)).all()) == 4
+    assert triggered == []
+
+
+def test_download_again_refused_when_not_following(client, settings, triggered):
+    show_id = _downloaded_eps(client, settings)
+    with _session(client) as s:
+        s.get(Show, show_id).status = "stopped"
+        s.commit()
+    r = client.post(f"/shows/{show_id}/episodes/4/retry")
+    assert r.status_code == 303 and r.headers["location"] == f"/shows/{show_id}"
+    with _session(client) as s:
+        ep = s.scalar(select(Episode).where(Episode.number == 4))
+        assert ep.state == "downloaded"
+        assert len(s.scalars(select(Grab).where(Grab.episode_id == ep.id)).all()) == 3
+    assert triggered == []
+
+
+def _assert_unknown(client, show_id, triggered):
+    page = client.get(f"/shows/{show_id}").text
+    assert "Missing" not in page and "Download again" not in page
+    client.post(f"/shows/{show_id}/episodes/4/retry")
+    with _session(client) as s:
+        assert s.scalar(select(Episode).where(Episode.number == 4)).state == "downloaded"
+    assert triggered == []
+
+
+def test_unmounted_library_is_unknown_not_missing(client, settings, triggered):
+    show_id = _downloaded_eps(client, settings, present=())
+    (settings.tv_dir / "The Wonder Coach" / "Season 2").rmdir()
+    (settings.tv_dir / "The Wonder Coach").rmdir()
+    _assert_unknown(client, show_id, triggered)
+
+
+def test_missing_season_folder_is_unknown_not_missing(client, settings, triggered):
+    show_id = _downloaded_eps(client, settings, present=())
+    (settings.tv_dir / "The Wonder Coach" / "Season 2").rmdir()
+    _assert_unknown(client, show_id, triggered)
+
+
+def test_unreadable_library_is_unknown_not_missing(client, settings, triggered, monkeypatch):
+    show_id = _downloaded_eps(client, settings)
+
+    def boom(season_dir, season):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(routes, "existing_episodes", boom)
+    _assert_unknown(client, show_id, triggered)
