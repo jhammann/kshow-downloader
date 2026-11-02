@@ -302,6 +302,7 @@ async def grab_selected(
             continue
         except ValueError as e:
             log.warning("rejected %s: %s", c.release.raw, e)
+            retried = ep.monitored and season.followed and show.status == "following"
             session.add(
                 Grab(
                     episode_id=ep.id,
@@ -315,7 +316,7 @@ async def grab_selected(
             await deps.notifier.send(
                 "Download failed",
                 f"{label}: the download link didn't return a torrent ({c.release.raw})."
-                + (" kshow will try another release." if ep.monitored else ""),
+                + (" kshow will try another release." if retried else ""),
             )
             continue
         # Retry an earlier failed add of this same post under its own grab and tag, so

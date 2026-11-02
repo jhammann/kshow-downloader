@@ -1473,3 +1473,41 @@ async def test_stop_during_the_finished_check_is_kept(db, http, tmp_path):
 
     with db() as s:
         assert s.get(Show, show_id).status == "stopped"
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("status", "followed", "promise"),
+    [
+        ("following", True, True),
+        ("stopped", True, False),
+        ("finished", True, False),
+        ("following", False, False),
+    ],
+)
+async def test_not_a_torrent_promises_a_retry_only_when_kshow_retries(
+    db, http, tmp_path, status, followed, promise
+):
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db)
+    add_episode(db, show_id, 4, monitored=True)
+    with db() as s:
+        s.get(Show, show_id).status = status
+        s.get(Season, season_id(db, show_id)).followed = followed
+        s.commit()
+    deps = make_deps(db, http, tmp_path)
+    sources = {"torrenttip": TorrenttipSource(None, "torrenttip")}
+    sources["torrenttip"].fetch_torrent = lambda url: _html()
+
+    with db() as s:
+        show = s.get(Show, show_id)
+        season = s.get(Season, season_id(db, show_id))
+        c = cand("신인감독 김연경 2.E04.261101.720p-NEXT", f"{SITE}/t/p1.html")
+        await grab_selected(s, deps, show, season, sources, {4: c})
+
+    assert sent(apprise) == [(
+        "Download failed",
+        "The Wonder Coach S02E04: the download link didn't return a torrent "
+        "(신인감독 김연경 2.E04.261101.720p-NEXT)."
+        + (" kshow will try another release." if promise else ""),
+    )]
