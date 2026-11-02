@@ -58,6 +58,20 @@ async def test_search_parses_fixture():
 
 
 @respx.mock
+async def test_search_later_page_adds_page_param():
+    route = respx.get(f"{BASE}/search").respond(
+        200, content=(FIX / "torrenttip_search.html").read_bytes()
+    )
+    client, _ = site()
+    source = TorrenttipSource(client)
+    await source.search("신인감독 김연경")
+    assert await source.search("신인감독 김연경", page=2)
+    first, second = (dict(c.request.url.params) for c in route.calls)
+    assert first == {"q": "신인감독 김연경"}
+    assert second == {"q": "신인감독 김연경", "page": "2"}
+
+
+@respx.mock
 async def test_fetch_torrent_follows_download_link():
     respx.get(POST).respond(200, content=(FIX / "torrenttip_post.html").read_bytes())
     route = respx.get(DOWNLOAD).respond(

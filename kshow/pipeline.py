@@ -187,25 +187,37 @@ async def search_candidates(
     query: str,
     pages: int = 1,
 ) -> list[Candidate]:
-    """Search every source for query. Only the first results page exists for now."""
-    candidates: list[Candidate] = []
+    """Search every source for query, reading up to `pages` result pages per source.
+
+    A source stops at the first page that has no release of exactly this title (older
+    results are other shows) or nothing new. Candidates are unique by post URL.
+    """
+    title = normalize_title(query)
+    candidates: dict[str, Candidate] = {}
     for source in sources:
         row = session.scalar(select(SourceRow).where(SourceRow.name == source.name))
-        try:
-            found = await source.search(query)
-        except SourceUnreachable as e:
-            log.warning("source %s unreachable: %s", source.name, e)
-            if row is not None and row.unreachable_since is None:
-                row.unreachable_since = utcnow()
+        for page in range(1, pages + 1):
+            try:
+                found = await source.search(query, page)
+            except SourceUnreachable as e:
+                log.warning("source %s unreachable (page %d): %s", source.name, page, e)
+                if row is not None and row.unreachable_since is None:
+                    row.unreachable_since = utcnow()
+                    session.commit()
+                    await deps.notifier.send(
+                        "Source unreachable", f"{source.name} is unreachable"
+                    )
+                break
+            if row is not None and row.unreachable_since is not None:
+                row.unreachable_since = None
                 session.commit()
-                await deps.notifier.send("Source unreachable", f"{source.name} is unreachable")
-            continue
-        if row is not None and row.unreachable_since is not None:
-            row.unreachable_since = None
-            session.commit()
-            await deps.notifier.send("Source back", f"{source.name} is reachable again.")
-        candidates.extend(found)
-    return candidates
+                await deps.notifier.send("Source back", f"{source.name} is reachable again.")
+            new = [c for c in found if c.post_url not in candidates]
+            for c in new:
+                candidates[c.post_url] = c
+            if not any(normalize_title(c.release.title) == title for c in new):
+                break
+    return list(candidates.values())
 
 
 async def _already_in_qbit(deps: Deps, data: bytes) -> bool:

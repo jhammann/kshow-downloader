@@ -53,8 +53,11 @@ class TorrenttipSource:
         self._client = client
         self.name = name
 
-    async def search(self, query: str) -> list[Candidate]:
-        final_url, body, _ = await self._client.get(f"/search?{urlencode({'q': query})}")
+    async def search(self, query: str, page: int = 1) -> list[Candidate]:
+        params: dict[str, str | int] = {"q": query}
+        if page > 1:
+            params["page"] = page
+        final_url, body, _ = await self._client.get(f"/search?{urlencode(params)}")
         found: dict[str, Candidate] = {}
         for link in HTMLParser(body.decode("utf-8", errors="replace")).css('a[href*="/t/"][title]'):
             release = parse_release_name(link.attributes["title"] or "")

@@ -6,6 +6,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from kshow.db import get_setting
 from kshow.downloads import process_downloads
+from kshow.manual import search_episodes
 from kshow.pipeline import Deps, check_all_shows, check_show
 
 log = logging.getLogger(__name__)
@@ -72,6 +73,21 @@ def trigger_check(app, show_id: int | None) -> None:
 
     task = asyncio.get_running_loop().create_task(
         _guarded("manual check", app.state.check_lock, run)()
+    )
+    app.state.tasks.add(task)
+    task.add_done_callback(app.state.tasks.discard)
+
+
+def trigger_search(app, show_id: int, season_number: int, numbers: list[int] | None) -> None:
+    """Run a one-shot manual search (one episode, or a whole season with numbers=None) under
+    the shared check lock, so it never overlaps a check or another search."""
+    deps: Deps = app.state.deps
+    task = asyncio.get_running_loop().create_task(
+        _guarded(
+            "manual search",
+            app.state.check_lock,
+            lambda: search_episodes(deps, show_id, season_number, numbers),
+        )()
     )
     app.state.tasks.add(task)
     task.add_done_callback(app.state.tasks.discard)

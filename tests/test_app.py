@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from kshow.config import Settings
 from kshow.main import create_app
-from kshow.scheduler import reschedule_check, start_scheduler, trigger_check
+from kshow.scheduler import reschedule_check, start_scheduler, trigger_check, trigger_search
 
 
 def _settings(tmp_path):
@@ -50,6 +50,32 @@ async def test_trigger_check_runs_under_lock(tmp_path, monkeypatch):
         release.set()
         await asyncio.gather(*app.state.tasks)
         assert calls == [("start", 1), ("end", 1), ("start", 2), ("end", 2)]
+        assert not app.state.tasks
+
+
+async def test_trigger_search_runs_under_check_lock(tmp_path, monkeypatch):
+    calls = []
+    release = asyncio.Event()
+
+    async def fake_check_show(deps, show_id):
+        calls.append(("check start", show_id))
+        await release.wait()
+        calls.append(("check end", show_id))
+
+    async def fake_search(deps, show_id, season_number, numbers):
+        calls.append(("search", show_id, season_number, numbers))
+
+    monkeypatch.setattr("kshow.scheduler.check_show", fake_check_show)
+    monkeypatch.setattr("kshow.scheduler.search_episodes", fake_search)
+    app = create_app(_settings(tmp_path))
+    async with app.router.lifespan_context(app):
+        trigger_check(app, 1)
+        trigger_search(app, 1, 2, [3])
+        await asyncio.sleep(0.05)
+        assert calls == [("check start", 1)]  # the search waits on the check lock
+        release.set()
+        await asyncio.gather(*app.state.tasks)
+        assert calls == [("check start", 1), ("check end", 1), ("search", 1, 2, [3])]
         assert not app.state.tasks
 
 
