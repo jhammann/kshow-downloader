@@ -333,7 +333,7 @@ async def test_qbit_down_keeps_episode_wanted(db, http, tmp_path):
         grab = s.scalars(select(Grab)).one()
         assert grab.state == "add_failed"
     # the overdue step after grabbing still ran
-    assert "The Wonder Coach E04 not found yet" in apprise.calls.last.request.content.decode()
+    assert "The Wonder Coach S02E04 not found yet" in apprise.calls.last.request.content.decode()
 
 
 @respx.mock
@@ -532,7 +532,7 @@ async def test_overdue_notifies_once(db, http, tmp_path):
 
     assert apprise.call_count == 1
     body = apprise.calls.last.request.content.decode()
-    assert "Episode overdue" in body and "The Wonder Coach E04 not found yet" in body
+    assert "Episode overdue" in body and "The Wonder Coach S02E04 not found yet" in body
     eps = episodes(db, show_id)
     assert eps[4].overdue_notified is True
     assert eps[5].overdue_notified is False
@@ -640,18 +640,44 @@ async def test_poster_backfill_rejects_non_tvdb_host(db, http, tmp_path):
 
 
 @respx.mock
-async def test_missing_downloaded_episode_is_not_regrabbed_automatically(db, http, tmp_path):
+@pytest.mark.parametrize("monitored", [True, False])
+async def test_missing_downloaded_episode_is_not_regrabbed_automatically(
+    db, http, tmp_path, monitored
+):
+    # Downloaded before, file since deleted from the (existing) season folder.
     (tmp_path / "The Wonder Coach" / "Season 2").mkdir(parents=True)
     mock_search("신인감독 김연경 2.E04.261101.720p-NEXT")
     mock_post(1)
     add = mock_qbit()
     show_id = add_show(db)
-    add_episode(db, show_id, 4, monitored=False, state="downloaded")
+    add_episode(db, show_id, 4, monitored=monitored, state="downloaded")
 
     await check_show(make_deps(db, http, tmp_path), show_id)
 
     assert add.call_count == 0
     assert episodes(db, show_id)[4].state == "downloaded"
+
+
+@respx.mock
+@pytest.mark.parametrize("monitored", [True, False])
+async def test_missing_downloaded_episode_listed_on_tvdb_is_not_regrabbed(
+    db, http, tmp_path, today, monitored
+):
+    (tmp_path / "The Wonder Coach" / "Season 2").mkdir(parents=True)
+    mock_tvdb(77, [(4, date(2026, 10, 25))])  # after followed_since
+    mock_search("신인감독 김연경 2.E04.261025.720p-NEXT")
+    mock_post(1)
+    add = mock_qbit()
+    show_id = add_show(db, tvdb_id=77)
+    add_episode(db, show_id, 4, monitored=monitored, state="downloaded")
+
+    await check_show(make_deps(db, http, tmp_path, tvdb=True), show_id)
+
+    assert add.call_count == 0
+    ep = episodes(db, show_id)[4]
+    assert (ep.state, ep.monitored, ep.tvdb_airdate) == (
+        "downloaded", monitored, date(2026, 10, 25),
+    )
 
 
 @respx.mock
@@ -1164,7 +1190,7 @@ async def test_overdue_only_for_monitored(db, http, tmp_path):
 
     await check_show(make_deps(db, http, tmp_path), show_id)
 
-    assert sent(apprise) == [("Episode overdue", "The Wonder Coach E04 not found yet")]
+    assert sent(apprise) == [("Episode overdue", "The Wonder Coach S02E04 not found yet")]
     eps = episodes(db, show_id)
     assert (eps[4].overdue_notified, eps[5].overdue_notified) == (True, False)
 
@@ -1242,3 +1268,60 @@ async def test_new_season_is_grabbed_in_the_check_that_finds_it(db, http, tmp_pa
         ("New season", "The Wonder Coach season 3 is announced; kshow will follow it."),
         ("Download started", "The Wonder Coach S03E01 (720p-NEXT)"),
     ]
+
+
+@respx.mock
+async def test_undated_monitored_episode_skips_releases_before_followed_since(
+    db, http, tmp_path
+):
+    # TVDB lists E04 without an air date (so it was created monitored), but the only release
+    # aired long before the season was followed: an old episode, not backfilled.
+    mock_search("신인감독 김연경 2.E04.250901.720p-NEXT")
+    mock_post(1)
+    add = mock_qbit()
+    show_id = add_show(db)
+    add_episode(db, show_id, 4, monitored=True)
+
+    await check_show(make_deps(db, http, tmp_path), show_id)
+
+    assert add.call_count == 0
+    assert episodes(db, show_id)[4].state == "wanted"
+
+
+@respx.mock
+@pytest.mark.parametrize("raw", [
+    "신인감독 김연경 2.E04.261001.720p-NEXT",  # on followed_since
+    "신인감독 김연경 2.E04.261341.720p-NEXT",  # no usable air date
+])
+async def test_undated_monitored_episode_takes_recent_or_undated_release(db, http, tmp_path, raw):
+    mock_search(raw)
+    mock_post(1)
+    add = mock_qbit()
+    show_id = add_show(db)
+    add_episode(db, show_id, 4, monitored=True)
+
+    await check_show(make_deps(db, http, tmp_path), show_id)
+
+    assert add.call_count == 1
+    assert episodes(db, show_id)[4].state == "downloading"
+
+
+@respx.mock
+async def test_finished_ignores_monitored_episodes_of_unfollowed_seasons(
+    db, http, tmp_path, today
+):
+    folder = tmp_path / "The Wonder Coach" / "Season 2"
+    folder.mkdir(parents=True)
+    (folder / "The Wonder Coach - S02E01.mkv").write_bytes(b"x")
+    mock_tvdb(77, [(2, 1, date(2026, 10, 11))], status="Ended")
+    mock_search()
+    show_id = add_show(db, tvdb_id=77)
+    with db() as s:
+        s.add(Season(show_id=show_id, number=1, release_season=1, folder="Season 01"))
+        s.commit()
+    add_episode(db, show_id, 3, season=1, monitored=True)  # e.g. a season later unfollowed
+
+    await check_show(make_deps(db, http, tmp_path, tvdb=True), show_id)
+
+    with db() as s:
+        assert s.get(Show, show_id).status == "finished"

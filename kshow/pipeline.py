@@ -378,6 +378,15 @@ def _wanted(
     return wanted
 
 
+def _too_old(season: Season, undated: set[int], c: Candidate) -> bool:
+    """A release for an episode without a TVDB air date that aired before the season was
+    followed: an old episode TVDB lists undated, which is left for manual search."""
+    r = c.release
+    if r.episode not in undated or r.airdate is None:
+        return False
+    return season.followed_since is None or r.airdate < season.followed_since
+
+
 async def check_show(deps: Deps, show_id: int) -> None:
     with deps.session_factory() as session:
         show = session.get(Show, show_id)
@@ -408,6 +417,13 @@ async def check_show(deps: Deps, show_id: int) -> None:
             for season in followed:
                 # 4. Wanted episodes; posts that failed before are not tried again
                 wanted = _wanted(session, season, candidates, title)
+                undated = set(
+                    session.scalars(
+                        select(Episode.number).where(
+                            Episode.season_id == season.id, Episode.tvdb_airdate.is_(None)
+                        )
+                    )
+                )
                 failed = {
                     (number, url)
                     for number, url in session.execute(
@@ -416,7 +432,12 @@ async def check_show(deps: Deps, show_id: int) -> None:
                         .where(Episode.season_id == season.id, Grab.state == "failed")
                     )
                 }
-                usable = [c for c in candidates if (c.release.episode, c.post_url) not in failed]
+                usable = [
+                    c
+                    for c in candidates
+                    if (c.release.episode, c.post_url) not in failed
+                    and not _too_old(season, undated, c)
+                ]
 
                 # 5. Select and grab
                 selected = select_releases(
@@ -448,18 +469,21 @@ async def check_show(deps: Deps, show_id: int) -> None:
         ).all()
         for ep in overdue:
             await deps.notifier.send(
-                "Episode overdue", f"{show.folder_name} E{ep.number:02} not found yet"
+                "Episode overdue",
+                f"{show.folder_name} S{ep.season.number:02}E{ep.number:02} not found yet",
             )
             ep.overdue_notified = True
             session.commit()
 
-        # 7. Finished: TVDB says ended and every monitored episode is downloaded
+        # 7. Finished: TVDB says ended and every monitored episode of a followed season is
+        #    downloaded
         if synced and deps.tvdb is not None:
             pending = session.scalar(
                 select(Episode.id)
                 .join(Season)
                 .where(
                     Season.show_id == show.id,
+                    Season.followed.is_(True),
                     Episode.monitored.is_(True),
                     Episode.state != "downloaded",
                 )
