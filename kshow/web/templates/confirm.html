@@ -8,7 +8,7 @@
     <p class="eyebrow">Add this show</p>
     <h1>{{ english or form.search_title }}</h1>
     {% if english %}<p class="hero-ko" lang="ko">{{ form.search_title }}</p>{% endif %}
-    <p class="muted">Season {{ form.tvdb_season }}</p>
+    <p class="muted">{% if seasons %}{{ seasons | length }} season{{ "s" if seasons | length != 1 }} on TVDB{% else %}Season {{ form.tvdb_season }}{% endif %}</p>
   </div>
 </section>
 {% for e in errors %}<p class="card alert" role="alert">{{ e }}</p>{% endfor %}
@@ -19,24 +19,63 @@
   {% if not form.tvdb_id %}<p class="muted">Not linked to TVDB: episode dates and “finished” are not tracked.</p>{% endif %}
   <label for="folder_name">Folder name in the TV library</label>
   <input id="folder_name" name="folder_name" value="{{ form.folder_name }}" type="text" required maxlength="120">
+
+  {% if seasons %}
+  <label for="tvdb_season">Follow from season</label>
+  <select id="tvdb_season" name="tvdb_season" data-season-picker>
+    {% for n in choices %}<option value="{{ n }}"{% if n == picked %} selected{% endif %}>Season {{ n }}</option>{% endfor %}
+  </select>
+  {% else %}
+  <label for="tvdb_season">{% if form.tvdb_id %}Follow from season{% else %}Season{% endif %}</label>
+  <input id="tvdb_season" name="tvdb_season" value="{{ form.tvdb_season }}" type="number" inputmode="numeric" min="1" max="99" required>
+  {% endif %}
+
   {% if target %}
   <div class="target">
     <span class="muted">Episodes go to</span>
-    <code>{{ target }}</code>
+    <code data-target>{{ target }}</code>
     {% if existing %}<span class="ok-text">Existing folder — new episodes go here.</span>{% endif %}
   </div>
   {% endif %}
-  <div class="row">
-    <div>
-      <label for="tvdb_season">TVDB season</label>
-      <input id="tvdb_season" name="tvdb_season" value="{{ form.tvdb_season }}" type="number" inputmode="numeric" min="1" max="99" required>
-    </div>
-    <div>
-      <label for="release_season">Release season</label>
-      <input id="release_season" name="release_season" value="{{ form.release_season }}" type="number" inputmode="numeric" min="1" max="99" required>
-    </div>
+
+  <div class="season-plan-box">
+    <p class="plan-summary"><strong data-plan-summary>Season {{ form.tvdb_season }}{% if form.tvdb_id %} and later{% endif %}: new episodes only.</strong></p>
+    {% if seasons %}
+    <ul class="season-plan">
+      {% for p in seasons %}
+      {% set on = picked is not none and p.number >= picked %}
+      <li class="season-plan-item{% if on %} is-followed{% endif %}" data-season="{{ p.number }}"{% if targets.get(p.number) %} data-target="{{ targets[p.number] }}"{% endif %}>
+        <span class="plan-name">Season {{ p.number }}</span>
+        <span class="muted plan-meta">{{ p.episodes }} ep{{ "s" if p.episodes != 1 }}{% if p.year %} · {{ p.year }}{% endif %}</span>
+        <span class="plan-tag">{{ "New episodes only" if on else "Not followed" }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    <p class="muted hint">Older episodes are not downloaded by themselves. You can search for any of them on the show page.</p>
   </div>
-  <p class="muted hint">Release season is the number after the title in torrent names (none means 1).</p>
   <button class="primary big" type="submit">Follow this show</button>
 </form>
+{% if seasons %}
+<script>
+  (() => {
+    const picker = document.querySelector("[data-season-picker]");
+    const items = document.querySelectorAll(".season-plan-item");
+    const summary = document.querySelector("[data-plan-summary]");
+    const target = document.querySelector("code[data-target]");
+    picker.addEventListener("change", () => {
+      const n = Number(picker.value);
+      summary.textContent = `Season ${n} and later: new episodes only.`;
+      items.forEach((item) => {
+        const on = Number(item.dataset.season) >= n;
+        item.classList.toggle("is-followed", on);
+        item.querySelector(".plan-tag").textContent = on ? "New episodes only" : "Not followed";
+        if (target && Number(item.dataset.season) === n && item.dataset.target) {
+          target.textContent = item.dataset.target;
+        }
+      });
+    });
+  })();
+</script>
+{% endif %}
 {% endblock %}

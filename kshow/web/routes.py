@@ -15,14 +15,15 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from sqlalchemy import delete, select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from kshow import clock, manual
 from kshow.auth import require_same_origin, require_user
-from kshow.db import Episode, Grab, Show, SourceRow, get_setting, set_setting, utcnow
-from kshow.library import existing_episodes, season_folder_name, suggest_folder
+from kshow.db import Episode, Grab, Season, Show, SourceRow, get_setting, set_setting
+from kshow.library import season_folder_name, suggest_folder
 from kshow.releases import parse_user_input
-from kshow.scheduler import reschedule_check, trigger_check
+from kshow.scheduler import reschedule_check, trigger_check, trigger_search
 from kshow.tvdb import TvdbError, TvdbMatch, safe_image_url
 from kshow.web.templating import STATIC_DIR, templates
 
@@ -110,11 +111,12 @@ def choose_folder(tv_dir: Path, raw: str) -> tuple[str | None, bool]:
     return folder, folder is not None and folder != raw.strip()
 
 
-def _season(value: str) -> int | None:
-    try:
-        n = int(value)
-    except (TypeError, ValueError):
+def _season_number(value: str) -> int | None:
+    """A season number from 1 to 99 typed as plain ASCII digits, else None."""
+    value = (value or "").strip()
+    if not (value.isascii() and value.isdecimal()):
         return None
+    n = int(value)
     return n if 1 <= n <= 99 else None
 
 
@@ -132,9 +134,13 @@ class ShowStatus:
 
 
 def _late_episodes(episodes: list[Episode], today: date) -> list[Episode]:
+    """Monitored episodes that aired before today and are not found yet."""
     return sorted(
         (e for e in episodes
-         if e.state in ("wanted", "failed") and e.tvdb_airdate and e.tvdb_airdate < today),
+         if e.monitored
+         and e.state in ("wanted", "failed")
+         and e.tvdb_airdate
+         and e.tvdb_airdate < today),
         key=lambda e: e.number,
     )
 
@@ -142,12 +148,13 @@ def _late_episodes(episodes: list[Episode], today: date) -> list[Episode]:
 def show_status(
     show: Show, episodes: list[Episode], grabs: list[Grab], today: date | None = None
 ) -> ShowStatus:
-    """The one most useful fact about a show: downloading, late, in Plex or waiting."""
+    """The one most useful fact about a show's season: downloading, late, in Plex or
+    waiting."""
     if show.status == "finished":
         return ShowStatus("finished", "Finished")
     if show.status == "stopped":
         return ShowStatus("stopped", "Stopped")
-    today = today or utcnow().date()
+    today = today or clock.today_kst()
     progress = {g.episode_id: g.progress for g in grabs if g.state == "downloading"}
     downloading = sorted(
         (e for e in episodes if e.state == "downloading"), key=lambda e: e.number
@@ -176,7 +183,7 @@ def status_line(
         return "Finished"
     if show.status == "stopped":
         return "Stopped"
-    today = today or utcnow().date()
+    today = today or clock.today_kst()
     progress = {g.episode_id: g.progress for g in grabs if g.state == "downloading"}
     parts = []
     downloaded = [e.number for e in episodes if e.state == "downloaded"]
@@ -280,13 +287,7 @@ def _show_cards(request: Request) -> dict:
             session.scalars(select(Show)).all(),
             key=lambda s: (_STATUS_ORDER.get(s.status, 9), s.folder_name.lower()),
         )
-        cards = []
-        for show in shows:
-            episodes = session.scalars(select(Episode).where(Episode.show_id == show.id)).all()
-            grabs = session.scalars(
-                select(Grab).where(Grab.episode_id.in_([e.id for e in episodes]))
-            ).all()
-            cards.append(_card(show, show_status(show, episodes, grabs)))
+        cards = [_card(session, show) for show in shows]
         down = session.scalars(
             select(SourceRow).where(SourceRow.unreachable_since.is_not(None))
         ).all()
@@ -300,11 +301,35 @@ def _show_cards(request: Request) -> dict:
     }
 
 
-def _card(show: Show, status: ShowStatus | None = None) -> dict:
+def default_season(seasons: list[Season]) -> Season | None:
+    """The season a show is summarised by: the latest followed one, else the latest one."""
+    followed = [s for s in seasons if s.followed]
+    pool = followed or seasons
+    return max(pool, key=lambda s: s.number) if pool else None
+
+
+def _season_episodes(session: Session, season: Season | None) -> tuple[list, list]:
+    """A season's episodes and their grabs (oldest grab first)."""
+    if season is None:
+        return [], []
+    episodes = session.scalars(
+        select(Episode).where(Episode.season_id == season.id).order_by(Episode.number)
+    ).all()
+    grabs = session.scalars(
+        select(Grab).where(Grab.episode_id.in_([e.id for e in episodes])).order_by(Grab.id)
+    ).all()
+    return list(episodes), list(grabs)
+
+
+def _card(session: Session, show: Show) -> dict:
+    """A show's poster and its status pill, computed from its default season."""
+    season = default_season(list(show.seasons))
+    episodes, grabs = _season_episodes(session, season)
     poster = safe_image_url(show.poster_url)
     return {
         "show": show,
-        "status": status,
+        "season": season,
+        "status": show_status(show, episodes, grabs),
         "poster": poster,
         "placeholder": None if poster else placeholder_poster(show.id, show.folder_name),
     }
@@ -380,6 +405,36 @@ async def add_search(request: Request):
     )
 
 
+@dataclass(frozen=True)
+class SeasonPlan:
+    """A season TVDB lists, as shown on the confirm page."""
+
+    number: int
+    episodes: int
+    year: int | None
+
+
+async def _tvdb_seasons(request: Request, tvdb_id: int | None) -> list[SeasonPlan] | None:
+    """Every real season TVDB lists for the series; None without TVDB or when it fails."""
+    tvdb = request.app.state.deps.tvdb
+    if tvdb_id is None or tvdb is None:
+        return None
+    try:
+        episodes = await tvdb.all_episodes(tvdb_id)
+    except TvdbError as e:
+        log.warning("TVDB seasons lookup failed for %s: %s", tvdb_id, e)
+        return None
+    by_season: dict[int, list] = {}
+    for ep in episodes:
+        if 1 <= ep.season <= 99:
+            by_season.setdefault(ep.season, []).append(ep)
+    plans = []
+    for number in sorted(by_season):
+        aired = [e.aired for e in by_season[number] if e.aired is not None]
+        plans.append(SeasonPlan(number, len(by_season[number]), min(aired).year if aired else None))
+    return plans
+
+
 @router.get("/add/confirm", response_class=HTMLResponse)
 async def add_confirm(
     request: Request,
@@ -396,7 +451,9 @@ async def add_confirm(
             english = await tvdb.english_name(tvdb_id)
         except TvdbError as e:
             log.warning("TVDB english name failed for %s: %s", tvdb_id, e)
-    poster = await _tvdb_poster(request, tvdb_id)
+    poster, seasons = await asyncio.gather(
+        _tvdb_poster(request, tvdb_id), _tvdb_seasons(request, tvdb_id)
+    )
     tv_dir = request.app.state.settings.tv_dir
     folder, changed = None, False
     if english:
@@ -410,10 +467,11 @@ async def add_confirm(
         "tvdb_id": "" if tvdb_id is None else str(tvdb_id),
         "folder_name": folder or "",
         "tvdb_season": str(season),
-        "release_season": str(season),
     }
     notes = [_SANITISED_NOTE.format(folder)] if changed else []
-    return _render_confirm(request, form, english=english, notes=notes, poster=poster)
+    return _render_confirm(
+        request, form, english=english, notes=notes, poster=poster, seasons=seasons
+    )
 
 
 async def _tvdb_poster(request: Request, tvdb_id: int | None) -> str | None:
@@ -445,18 +503,19 @@ def _render_confirm(
     notes: list[str] | None = None,
     status_code: int = 200,
     poster: str | None = None,
+    seasons: list[SeasonPlan] | None = None,
 ) -> HTMLResponse:
-    """The confirm page, with the library path the pre-filled values lead to."""
+    """The confirm page, with the library path the pre-filled values lead to and, when TVDB
+    lists the seasons, which of them will be followed."""
     tv_dir = request.app.state.settings.tv_dir
     folder = form["folder_name"]
-    season = _season(form["tvdb_season"])
-    target = existing = None
-    if folder and season is not None and folder == (
-        existing_folder(tv_dir, folder) or sanitize_folder(folder)
-    ):
+    picked = _season_number(form["tvdb_season"])
+    numbers = sorted({p.number for p in seasons or ()} | ({picked} if picked else set()))
+    targets: dict[int, str] = {}
+    existing = None
+    if folder and folder == (existing_folder(tv_dir, folder) or sanitize_folder(folder)):
         show_dir = tv_dir / folder
-        season_folder = season_folder_name(show_dir, season)
-        target = f"{tv_dir}/{folder}/{season_folder}"
+        targets = {n: f"{tv_dir}/{folder}/{season_folder_name(show_dir, n)}" for n in numbers}
         existing = show_dir.is_dir()
     return _render(
         request,
@@ -466,7 +525,11 @@ def _render_confirm(
         english=english,
         errors=errors or [],
         notes=notes or [],
-        target=target,
+        picked=picked,
+        seasons=seasons,
+        choices=numbers,
+        targets=targets,
+        target=targets.get(picked),
         existing=existing,
         poster_image=safe_image_url(poster),
         placeholder=placeholder_poster(
@@ -480,7 +543,7 @@ async def add_show(request: Request):
     raw = await request.form()
     form = {
         k: str(raw.get(k, ""))
-        for k in ("search_title", "tvdb_id", "folder_name", "tvdb_season", "release_season")
+        for k in ("search_title", "tvdb_id", "folder_name", "tvdb_season")
     }
     errors = []
     title = " ".join(form["search_title"].split())
@@ -495,45 +558,64 @@ async def add_show(request: Request):
     folder, changed = choose_folder(tv_dir, form["folder_name"])
     if folder is None:
         errors.append("Folder name is empty or not allowed.")
-    tvdb_season = _season(form["tvdb_season"])
-    if tvdb_season is None:
-        errors.append("TVDB season must be a number from 1 to 99.")
-    release_season = _season(form["release_season"])
-    if release_season is None:
-        errors.append("Release season must be a number from 1 to 99.")
+    picked = _season_number(form["tvdb_season"])
+    if picked is None:
+        errors.append("Season must be a number from 1 to 99.")
     if not errors and changed:
         form["folder_name"] = folder
         return _render_confirm(request, form, notes=[_SANITISED_NOTE.format(folder)])
-    # The poster comes from TVDB, never from the form; the check backfills it on failure.
-    # Look it up before the duplicate check so check-and-insert below has no await in between:
-    # a double-tapped submit can then never create the same show twice.
-    poster = await _tvdb_poster(request, tvdb_id) if not errors else None
+    # The poster and the seasons come from TVDB, never from the form; the check backfills a
+    # missing poster. Look both up before the duplicate check so check-and-insert below has
+    # no await in between: a double-tapped submit can then never create the same show twice.
+    poster = tvdb_seasons = None
+    if not errors:
+        poster, tvdb_seasons = await asyncio.gather(
+            _tvdb_poster(request, tvdb_id), _tvdb_seasons(request, tvdb_id)
+        )
     with _session(request) as session:
         if not errors:
-            dup = session.scalar(
-                select(Show).where(
-                    Show.folder_name == folder,
-                    Show.tvdb_season == tvdb_season,
-                    Show.status == "following",
-                )
-            )
+            same = [Show.folder_name == folder]
+            if tvdb_id is not None:
+                same.append(Show.tvdb_id == tvdb_id)
+            dup = session.scalar(select(Show).where(or_(*same)).order_by(Show.id).limit(1))
             if dup is not None:
                 return _redirect(f"/shows/{dup.id}")
         if errors:
             return _render_confirm(request, form, errors=errors, status_code=400)
+        if tvdb_id is not None and tvdb_seasons is None:
+            log.warning(
+                "TVDB seasons unavailable while adding %s; following only season %d for now",
+                folder,
+                picked,
+            )
+        # Every season TVDB lists is known now, so the first check follows none of them as
+        # "new"; the picked season and later ones are followed from today.
+        numbers = sorted({p.number for p in tvdb_seasons or ()} | {picked})
         show = Show(
             search_title=title,
-            release_season=release_season,
             tvdb_id=tvdb_id,
-            tvdb_season=tvdb_season,
             folder_name=folder,
-            season_folder=season_folder_name(tv_dir / folder, tvdb_season),
             poster_url=poster,
+            max_known_season=max(numbers),
         )
         session.add(show)
+        session.flush()
+        today = clock.today_kst()
+        for number in numbers:
+            follow = number >= picked
+            session.add(
+                Season(
+                    show_id=show.id,
+                    number=number,
+                    release_season=number,
+                    folder=season_folder_name(tv_dir / folder, number),
+                    followed=follow,
+                    followed_since=today if follow else None,
+                )
+            )
         session.commit()
         show_id = show.id
-    log.info("added show %s season %d", folder, tvdb_season)
+    log.info("added show %s, following season %d and later", folder, picked)
     trigger_check(request.app, show_id)
     return _redirect(f"/shows/{show_id}")
 
@@ -541,98 +623,141 @@ async def add_show(request: Request):
 # --- show detail ------------------------------------------------------------------
 
 
-def _scan_season(season_dir: Path, season: int) -> set[int] | None:
-    if not season_dir.is_dir():
-        return None  # e.g. /tv not mounted: we can't tell which files are gone
-    return existing_episodes(season_dir, season)
+@dataclass(frozen=True)
+class EpisodeRow:
+    """One episode line: its pill and whether its own Search button would do anything."""
+
+    ep: Episode
+    grab: Grab | None  # the latest grab, for the release name
+    kind: str  # pill colour: ok | late | downloading | wanted | waiting | idle
+    label: str
+    searchable: bool
 
 
-async def _files_on_disk(request: Request, show: Show) -> set[int] | None:
-    """Episode numbers whose video file is in the show's season folder; None when unknown."""
+def episode_row(
+    ep: Episode,
+    grabs: list[Grab],
+    on_disk: set[int] | None,
+    today: date,
+    automatic: bool,
+) -> EpisodeRow:
+    """The pill for an episode and whether its Search button is shown.
+
+    `automatic` is whether kshow fetches this season by itself (a followed season of a
+    following show): only then is a monitored episode "Wanted". `on_disk` None means the
+    folder couldn't be read, so no episode is called Missing. Search follows the rules of
+    manual.episodes_to_search (read-only), and skips episodes that haven't aired yet.
+    """
+    active = next((g for g in grabs if g.state == "downloading"), None)
+    present = on_disk is not None and ep.number in on_disk
+    missing = ep.state == "downloaded" and on_disk is not None and not present
+    unaired = ep.tvdb_airdate is not None and ep.tvdb_airdate > today
+    if ep.state == "downloading":
+        pct = math.floor(min(max(active.progress, 0.0), 1.0) * 100) if active else 0
+        kind, label = "downloading", f"Downloading {pct}%"
+    elif missing:
+        kind, label = "late", "Missing"
+    elif ep.state == "downloaded" or present:
+        kind, label = "ok", "In Plex"
+    elif ep.state == "failed":
+        kind, label = "late", "Failed"
+    elif unaired:
+        kind, label = "waiting", "Not aired yet"
+    elif ep.monitored and automatic:
+        kind, label = "wanted", "Wanted"
+    else:
+        kind, label = "idle", "Not downloaded"
+    if ep.state == "downloading" or active is not None or present:
+        searchable = False
+    elif ep.state == "downloaded":
+        searchable = missing
+    else:
+        searchable = not unaired
+    return EpisodeRow(ep, grabs[-1] if grabs else None, kind, label, searchable)
+
+
+def season_has_targets(
+    episodes: list[Episode], grabs: dict[int, list[Grab]], on_disk: set[int] | None, today: date
+) -> bool:
+    """Whether "Search season" would look for anything (manual.episodes_to_search with
+    numbers=None, read-only): an aired episode never downloaded, filed or finished."""
+    return any(
+        e.state not in ("downloaded", "downloading")
+        and e.filed_path is None
+        and (e.tvdb_airdate is None or e.tvdb_airdate <= today)
+        and not (on_disk is not None and e.number in on_disk)
+        and not any(g.state == "done" for g in grabs.get(e.id, ()))
+        for e in episodes
+    )
+
+
+def _season_url(show_id: int, number: int) -> str:
+    return f"/shows/{show_id}?season={number}"
+
+
+def _get_season(session: Session, show_id: int, number: int) -> Season:
+    _get_show(session, show_id)
+    season = session.scalar(
+        select(Season).where(Season.show_id == show_id, Season.number == number)
+    )
+    if season is None:
+        raise HTTPException(status_code=404, detail="Season not found")
+    return season
+
+
+async def _on_disk(request: Request, show: Show, season: Season) -> set[int] | None:
     tv_dir = request.app.state.settings.tv_dir
-    season_dir = tv_dir / show.folder_name / show.season_folder
-    try:
-        return await asyncio.to_thread(_scan_season, season_dir, show.tvdb_season)
-    except OSError as e:
-        log.warning("cannot read %s: %s", season_dir, e)
-        return None
+    return await asyncio.to_thread(manual.files_on_disk, tv_dir, show, season)
 
 
-def _is_missing(ep: Episode, on_disk: set[int] | None) -> bool:
-    return ep.state == "downloaded" and on_disk is not None and ep.number not in on_disk
-
-
-@router.get("/shows/{show_id}", response_class=HTMLResponse)
-async def show_detail(request: Request, show_id: int):
+async def _show_page(
+    request: Request,
+    show_id: int,
+    number: int | None,
+    errors: list[str] | None = None,
+    status_code: int = 200,
+) -> HTMLResponse:
     with _session(request) as session:
         show = _get_show(session, show_id)
-        episodes = session.scalars(
-            select(Episode).where(Episode.show_id == show_id).order_by(Episode.number)
-        ).all()
-        grabs = session.scalars(
-            select(Grab)
-            .where(Grab.episode_id.in_([e.id for e in episodes]))
-            .order_by(Grab.id)
-        ).all()
-    latest = {g.episode_id: g for g in grabs}  # ordered by id, so the last one wins
-    on_disk = await _files_on_disk(request, show)
-    rows = [
-        {
-            "ep": e,
-            "grab": latest.get(e.id),
-            "missing": _is_missing(e, on_disk),
-        }
-        for e in episodes
-    ]
+        seasons = list(show.seasons)
+        current = next((s for s in seasons if s.number == number), None) or default_season(
+            seasons
+        )
+        episodes, grabs = _season_episodes(session, current)
+        card = _card(session, show)
+    on_disk = await _on_disk(request, show, current) if current is not None else None
+    today = clock.today_kst()
+    automatic = current is not None and current.followed and show.status == "following"
+    by_episode: dict[int, list[Grab]] = {}
+    for g in grabs:
+        by_episode.setdefault(g.episode_id, []).append(g)
+    rows = [episode_row(e, by_episode.get(e.id, []), on_disk, today, automatic) for e in episodes]
     return _render(
         request,
         "show.html",
+        status_code=status_code,
         show=show,
+        seasons=seasons,
+        season=current,
         rows=rows,
-        status=status_line(show, episodes, grabs),
-        card=_card(show, show_status(show, episodes, grabs)),
+        can_search_season=season_has_targets(episodes, by_episode, on_disk, today),
+        status=status_line(show, episodes, grabs, today),
+        card=card,
+        errors=errors or [],
+        can_resume=show.status == "stopped" and any(s.followed for s in seasons),
     )
+
+
+@router.get("/shows/{show_id}", response_class=HTMLResponse)
+async def show_detail(request: Request, show_id: int, season: str = ""):
+    return await _show_page(request, show_id, _season_number(season))
 
 
 @router.post("/shows/{show_id}/search")
 async def show_search(request: Request, show_id: int):
+    """"Search now": run the automatic check for a followed show."""
     with _session(request) as session:
         show = _get_show(session, show_id)
-        following = show.status == "following"
-    if following:
-        trigger_check(request.app, show_id)
-    return _redirect(f"/shows/{show_id}")
-
-
-@router.post("/shows/{show_id}/episodes/{number}/retry")
-async def episode_retry(request: Request, show_id: int, number: int):
-    with _session(request) as session:
-        show = _get_show(session, show_id)
-        ep = session.scalar(
-            select(Episode).where(Episode.show_id == show_id, Episode.number == number)
-        )
-        if ep is None:
-            raise HTTPException(status_code=404, detail="Episode not found")
-        # A downloaded episode whose file was deleted can be downloaded again (by hand only).
-        missing = (
-            ep.state == "downloaded"
-            and show.status == "following"
-            and _is_missing(ep, await _files_on_disk(request, show))
-            and session.scalar(
-                select(Grab.id).where(Grab.episode_id == ep.id, Grab.state == "downloading")
-            )
-            is None
-        )
-        if ep.state not in ("wanted", "failed") and not missing:
-            return _redirect(f"/shows/{show_id}")
-        ep.state = "wanted"
-        if missing:
-            ep.overdue_notified = True  # asked for by the user, so never "overdue"
-        cleared = ("done", "failed", "add_failed") if missing else ("failed", "add_failed")
-        session.execute(
-            delete(Grab).where(Grab.episode_id == ep.id, Grab.state.in_(cleared))
-        )
-        session.commit()
         following = show.status == "following"
     if following:
         trigger_check(request.app, show_id)
@@ -647,6 +772,103 @@ async def show_stop(request: Request, show_id: int):
         session.commit()
         log.info("stopped following %s", show.folder_name)
     return _redirect(f"/shows/{show_id}")
+
+
+@router.post("/shows/{show_id}/follow")
+async def show_follow_again(request: Request, show_id: int):
+    """Follow a stopped show again: its followed seasons are fetched automatically again."""
+    with _session(request) as session:
+        show = _get_show(session, show_id)
+        resumed = show.status == "stopped"
+        if resumed:
+            show.status = "following"
+            session.commit()
+            log.info("following %s again", show.folder_name)
+    if resumed:
+        trigger_check(request.app, show_id)
+    return _redirect(f"/shows/{show_id}")
+
+
+@router.post("/shows/{show_id}/seasons/{number}/search")
+async def season_search(request: Request, show_id: int, number: int):
+    """"Search season": a one-shot search; the background run picks the episodes."""
+    with _session(request) as session:
+        _get_season(session, show_id, number)
+    trigger_search(request.app, show_id, number, None)
+    return _redirect(_season_url(show_id, number))
+
+
+@router.post("/shows/{show_id}/seasons/{number}/episodes/{episode}/search")
+async def episode_search(request: Request, show_id: int, number: int, episode: int):
+    """An episode's own Search. Only started when it would do something; the background run
+    checks again under the check lock before changing anything."""
+    with _session(request) as session:
+        season = _get_season(session, show_id, number)
+        show = season.show
+        ep = session.scalar(
+            select(Episode).where(Episode.season_id == season.id, Episode.number == episode)
+        )
+        if ep is None:
+            raise HTTPException(status_code=404, detail="Episode not found")
+        grabs = list(
+            session.scalars(select(Grab).where(Grab.episode_id == ep.id).order_by(Grab.id))
+        )
+    on_disk = await _on_disk(request, show, season)
+    if episode_row(ep, grabs, on_disk, clock.today_kst(), False).searchable:
+        trigger_search(request.app, show_id, number, [episode])
+    return _redirect(_season_url(show_id, number))
+
+
+@router.post("/shows/{show_id}/seasons/{number}/follow")
+async def season_follow(request: Request, show_id: int, number: int):
+    """Turn "Following new episodes" on or off for one season.
+
+    On: episodes airing from today (or without a date) that aren't downloaded yet become
+    monitored. Off: nothing is fetched automatically any more; episode rows stay as they are.
+    """
+    value = str((await request.form()).get("followed", ""))
+    if value not in ("0", "1"):
+        raise HTTPException(status_code=400, detail="followed must be 0 or 1")
+    with _session(request) as session:
+        season = _get_season(session, show_id, number)
+        if value == "1" and not season.followed:
+            today = clock.today_kst()
+            season.followed = True
+            season.followed_since = today
+            for ep in session.scalars(
+                select(Episode).where(
+                    Episode.season_id == season.id,
+                    Episode.state.not_in(("downloaded", "downloading")),
+                )
+            ):
+                if ep.tvdb_airdate is None or ep.tvdb_airdate >= today:
+                    ep.monitored = True
+            log.info("following season %d of show %d from %s", number, show_id, today)
+        elif value == "0" and season.followed:
+            season.followed = False
+            log.info("no longer following season %d of show %d", number, show_id)
+        session.commit()
+    return _redirect(_season_url(show_id, number))
+
+
+@router.post("/shows/{show_id}/seasons/{number}/release-season")
+async def season_release(request: Request, show_id: int, number: int):
+    """The season number release names use for this season (1 to 99)."""
+    value = _season_number(str((await request.form()).get("release_season", "")))
+    with _session(request) as session:
+        season = _get_season(session, show_id, number)
+        if value is not None:
+            season.release_season = value
+            session.commit()
+    if value is None:
+        return await _show_page(
+            request,
+            show_id,
+            number,
+            errors=["Release season must be a number from 1 to 99."],
+            status_code=400,
+        )
+    return _redirect(_season_url(show_id, number))
 
 
 # --- settings ---------------------------------------------------------------------

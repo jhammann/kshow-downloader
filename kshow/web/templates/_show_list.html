@@ -19,7 +19,7 @@
             {% if card.status.kind == "downloading" %}<span class="bar" role="progressbar" aria-label="Download progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ (card.status.progress * 100) | int }}"><i style="width: {{ (card.status.progress * 100) | int }}%"></i></span>{% endif %}
           </span>
           <span class="tile-title">{{ card.show.folder_name }}</span>
-          <span class="tile-sub" lang="ko">{{ card.show.search_title }} · S{{ card.show.tvdb_season }}</span>
+          <span class="tile-sub" lang="ko">{{ card.show.search_title }}{% if card.season %} · S{{ card.season.number }}{% endif %}</span>
         </a>
       </li>
       {% endfor %}

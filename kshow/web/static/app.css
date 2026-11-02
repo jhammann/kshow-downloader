@@ -261,10 +261,73 @@ body.auth main { width: 100%; max-width: 380px; padding-top: 24px; padding-botto
 .episode-head { display: flex; align-items: center; gap: 12px; }
 .episode-no { font-weight: 750; font-variant-numeric: tabular-nums; min-width: 2.6em; }
 .episode-meta { flex: 1; min-width: 0; }
-.episode .pill { text-transform: capitalize; background: var(--surface-2); }
+.episode .pill { background: var(--surface-2); flex: none; }
 .episode .pill-downloading { background: rgba(245, 179, 1, 0.92); }
 .release { margin: 4px 0 0; font-size: 0.8rem; word-break: break-all; }
 .episode form button { width: auto; }
+
+.episode-head form { flex: none; }
+.episode-head .episode-search { margin: 0; min-height: 44px; padding: 6px 14px; }
+.episode-date { white-space: nowrap; }
+.pill-wanted { color: var(--accent); }
+.pill-idle { color: var(--muted); box-shadow: inset 0 0 0 1px var(--border); }
+.episode .pill-idle { background: transparent; }
+
+/* --- seasons on the show page ---------------------------------------------- */
+.actions-single { margin: 6px 0 4px; max-width: 560px; }
+.actions-single button { width: 100%; }
+.season-tabs {
+  display: flex; gap: 6px; margin: 18px 0 0; padding: 0 0 2px;
+  overflow-x: auto; scrollbar-width: none; border-bottom: 1px solid var(--border);
+}
+.season-tabs::-webkit-scrollbar { display: none; }
+.season-tab {
+  flex: none; display: inline-flex; align-items: center; gap: 6px;
+  min-height: 44px; padding: 0 14px; margin-bottom: -3px;
+  color: var(--muted); text-decoration: none; font-weight: 650; font-size: 0.95rem;
+  border-bottom: 3px solid transparent;
+}
+.season-tab:hover { color: var(--text); }
+.season-tab[aria-current="page"] { color: var(--text); border-bottom-color: var(--accent); }
+.tab-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+.season-panel { padding-top: 6px; }
+.switch-form { margin: 6px 0 0; }
+.switch {
+  display: flex; width: 100%; justify-content: space-between; gap: 12px;
+  min-height: 52px; margin: 0; padding: 8px 14px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  font-weight: 650; text-align: left;
+}
+.switch-track {
+  flex: none; position: relative; width: 48px; height: 28px; border-radius: 999px;
+  background: var(--border); transition: background 0.15s;
+}
+.switch-thumb {
+  position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%;
+  background: var(--text); transition: transform 0.15s;
+}
+.switch[aria-checked="true"] .switch-track { background: var(--accent); }
+.switch[aria-checked="true"] .switch-thumb { transform: translateX(20px); background: var(--accent-text); }
+.switch-hint { margin: 6px 2px 10px; }
+.search-season { width: 100%; max-width: 560px; margin: 4px 0 12px; }
+.release-form { margin: 20px 0 0; padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.release-form label { margin-top: 0; }
+.release-row { display: flex; gap: 8px; align-items: center; }
+.release-row input { width: 88px; flex: none; }
+.release-row button { margin: 0; min-height: 46px; }
+
+/* --- add: which seasons are followed --------------------------------------- */
+.season-plan-box { margin-top: 12px; }
+.plan-summary { margin: 0 0 8px; color: var(--accent); font-size: 0.95rem; }
+.season-plan { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--border); }
+.season-plan-item {
+  display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 2px;
+  border-bottom: 1px solid var(--border);
+}
+.plan-name { font-weight: 650; }
+.plan-meta { flex: 1; min-width: 0; font-size: 0.82rem; }
+.plan-tag { flex: none; font-size: 0.78rem; font-weight: 700; color: var(--muted); }
+.season-plan-item.is-followed .plan-tag { color: var(--ok); }
 
 .target {
   display: flex; flex-direction: column; gap: 2px;
