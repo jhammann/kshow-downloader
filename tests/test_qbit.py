@@ -327,3 +327,20 @@ async def test_add_transport_error_is_a_plain_error(client):
     with pytest.raises(QbitError) as info:
         await client.add_torrent(b"x", "a.torrent", "kshow", "/dl", "t")
     assert not isinstance(info.value, QbitRejected)
+
+
+@respx.mock
+async def test_has_torrent_looks_up_by_hash_in_any_category(client):
+    respx.post(f"{API}/auth/login").mock(return_value=login_ok())
+    found = respx.get(f"{API}/torrents/info", params={"hashes": H1}).mock(
+        return_value=httpx.Response(200, json=[{"hash": H1, "category": ""}])
+    )
+    assert await client.has_torrent(H1.upper()) is True
+    assert "category" not in str(found.calls[0].request.url)
+    found.mock(return_value=httpx.Response(200, json=[]))
+    assert await client.has_torrent(H1) is False
+
+
+async def test_has_torrent_rejects_a_bad_hash_without_a_request(client):
+    with pytest.raises(QbitError):
+        await client.has_torrent("all")

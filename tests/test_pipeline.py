@@ -14,6 +14,7 @@ from kshow.pipeline import Deps, check_all_shows, check_show, select_releases
 from kshow.qbit import QbitClient
 from kshow.releases import parse_release_name
 from kshow.sources.torrenttip import Candidate
+from kshow.torrentfile import info_hash
 from kshow.tvdb import TvdbClient
 
 SITE = "https://torrenttip250.top"
@@ -150,6 +151,12 @@ def mock_qbit():
         200, text="Ok.", headers={"Set-Cookie": "SID=abc; path=/"}
     )
     return respx.post(f"{QBIT}/api/v2/torrents/add").respond(200, text="Ok.")
+
+
+def mock_not_in_qbit():
+    """A rejected torrent that qBittorrent doesn't already have (see _already_in_qbit)."""
+    route = respx.get(f"{QBIT}/api/v2/torrents/info", params={"hashes": info_hash(TORRENT)})
+    return route.respond(200, json=[])
 
 
 def mock_tvdb(tvdb_id, episodes, status="Continuing"):
@@ -352,6 +359,7 @@ async def test_qbit_rejects_torrent_keeps_episode_wanted(db, http, tmp_path):
         200, text="Ok.", headers={"Set-Cookie": "SID=abc; path=/"}
     )
     respx.post(f"{QBIT}/api/v2/torrents/add").respond(200, text="Fails.")
+    mock_not_in_qbit()
     show_id = add_show(db)
 
     await check_show(make_deps(db, http, tmp_path), show_id)
@@ -359,6 +367,58 @@ async def test_qbit_rejects_torrent_keeps_episode_wanted(db, http, tmp_path):
     assert episodes(db, show_id)[4].state == "wanted"
     with db() as s:
         assert s.scalars(select(Grab)).one().state == "failed"
+
+
+@respx.mock
+async def test_rejection_of_torrent_qbittorrent_already_has_says_so(db, http, tmp_path):
+    # The user added this release to qBittorrent by hand earlier (outside the kshow category)
+    mock_search("신인감독 김연경 2.E04.261101.720p-NEXT")
+    mock_post(1)
+    respx.post(f"{QBIT}/api/v2/auth/login").respond(
+        204, headers={"Set-Cookie": "QBT_SID_8089=abc; path=/"}
+    )
+    respx.post(f"{QBIT}/api/v2/torrents/add").respond(409, text="Conflict")
+    existing = respx.get(f"{QBIT}/api/v2/torrents/info", params={"hashes": info_hash(TORRENT)})
+    existing.respond(200, json=[{"hash": info_hash(TORRENT), "name": "manual", "category": ""}])
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db)
+
+    await check_show(make_deps(db, http, tmp_path), show_id)
+
+    assert existing.called
+    assert sent(apprise) == [
+        (
+            "Download failed",
+            "The Wonder Coach S02E04: qBittorrent already has this torrent (added outside "
+            "kshow). Remove it there, then tap Retry.",
+        )
+    ]
+    assert episodes(db, show_id)[4].state == "wanted"
+
+
+@respx.mock
+async def test_rejection_of_unknown_torrent_keeps_generic_message(db, http, tmp_path):
+    mock_search("신인감독 김연경 2.E04.261101.720p-NEXT")
+    mock_post(1)
+    respx.post(f"{QBIT}/api/v2/auth/login").respond(
+        200, text="Ok.", headers={"Set-Cookie": "SID=abc; path=/"}
+    )
+    respx.post(f"{QBIT}/api/v2/torrents/add").respond(409, text="Conflict")
+    respx.get(f"{QBIT}/api/v2/torrents/info", params={"hashes": info_hash(TORRENT)}).respond(
+        200, json=[]
+    )
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db)
+
+    await check_show(make_deps(db, http, tmp_path), show_id)
+
+    assert sent(apprise) == [
+        (
+            "Download failed",
+            "The Wonder Coach S02E04: qBittorrent rejected the torrent "
+            "(신인감독 김연경 2.E04.261101.720p-NEXT).",
+        )
+    ]
 
 
 @respx.mock
@@ -677,6 +737,7 @@ async def test_qbit_rejection_is_not_an_outage_and_moves_on(db, http, tmp_path, 
         200, text="Ok.", headers={"Set-Cookie": "SID=abc; path=/"}
     )
     add = respx.post(f"{QBIT}/api/v2/torrents/add").mock(return_value=rejection)
+    mock_not_in_qbit()
     apprise = respx.post(APPRISE).respond(200)
     show_id = add_show(db)
     deps = make_deps(db, http, tmp_path)
@@ -707,6 +768,7 @@ async def test_outage_then_rejection_on_same_post_notifies_rejection_once(db, ht
         ]
     )
     respx.post(f"{QBIT}/api/v2/torrents/add").respond(200, text="Fails.")
+    mock_not_in_qbit()
     respx.get(f"{QBIT}/api/v2/torrents/info").respond(200, json=[])  # not added after all
     apprise = respx.post(APPRISE).respond(200)
     show_id = add_show(db)
@@ -731,6 +793,7 @@ async def test_qbit_rejection_ends_an_outage(db, http, tmp_path):
         200, text="Ok.", headers={"Set-Cookie": "SID=abc; path=/"}
     )
     respx.post(f"{QBIT}/api/v2/torrents/add").respond(200, text="Fails.")
+    mock_not_in_qbit()
     apprise = respx.post(APPRISE).respond(200)
     show_id = add_show(db)
     with db() as s:

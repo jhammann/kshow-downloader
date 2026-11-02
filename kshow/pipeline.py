@@ -14,6 +14,7 @@ from kshow.db import Episode, Grab, Show, SourceRow, get_setting, utcnow
 from kshow.library import existing_episodes
 from kshow.notify import Notifier
 from kshow.qbit import QbitClient, QbitError, QbitRejected
+from kshow.torrentfile import info_hash
 from kshow.qbit_outage import qbit_failed, qbit_ok
 from kshow.releases import normalize_title
 from kshow.sources.torrenttip import (
@@ -143,6 +144,18 @@ async def _search(
     return candidates
 
 
+async def _already_in_qbit(deps: Deps, data: bytes) -> bool:
+    """Whether a rejected torrent is one qBittorrent already has, e.g. added by hand."""
+    hash_ = info_hash(data)
+    if hash_ is None:
+        return False
+    try:
+        return await deps.qbit.has_torrent(hash_)
+    except QbitError as e:
+        log.warning("could not look up rejected torrent %s: %s", hash_, e)
+        return False
+
+
 async def _grab(
     session: Session,
     deps: Deps,
@@ -234,10 +247,14 @@ async def _grab(
                 # Nothing was added: fail the post so the next check tries another release.
                 grab.state = "failed"
                 session.commit()
-                await deps.notifier.send(
-                    "Download failed",
-                    f"{label}: qBittorrent rejected the torrent ({c.release.raw}).",
-                )
+                if await _already_in_qbit(deps, data):
+                    reason = (
+                        "qBittorrent already has this torrent (added outside kshow). "
+                        "Remove it there, then tap Retry."
+                    )
+                else:
+                    reason = f"qBittorrent rejected the torrent ({c.release.raw})."
+                await deps.notifier.send("Download failed", f"{label}: {reason}")
                 continue
             log.info("torrent %s was added after all; adopting it", grab.qbit_tag)
         except QbitError as e:

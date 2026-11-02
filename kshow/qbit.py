@@ -167,6 +167,16 @@ class QbitClient:
         except (KeyError, TypeError, ValueError, AttributeError) as exc:
             raise QbitError("qBittorrent /torrents/info returned unexpected data") from exc
 
+    async def has_torrent(self, hash: str) -> bool:
+        """Whether qBittorrent has this torrent in any category. Read-only: used only to
+        explain a rejected add; kshow never changes torrents outside its own category."""
+        self._check_hash(hash)
+        resp = await self._request("GET", "/torrents/info", params={"hashes": hash.lower()})
+        items = self._json(resp, "/torrents/info")
+        if not isinstance(items, list):
+            raise QbitError("qBittorrent /torrents/info returned unexpected data")
+        return len(items) > 0
+
     async def files(self, hash: str) -> list[QbitFile]:
         self._check_hash(hash)
         resp = await self._request("GET", "/torrents/files", params={"hash": hash})
