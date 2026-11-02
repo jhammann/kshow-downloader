@@ -96,6 +96,7 @@ DEFAULT_SETTINGS = {
     "preferred_resolution": "720p",
     "stall_hours": "6",
     "path_map": "",
+    "qbit_outage_since": "",  # naive-UTC ISO time qBittorrent started failing, "" when fine
 }
 
 

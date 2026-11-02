@@ -1,3 +1,4 @@
+import json
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -7,7 +8,7 @@ import respx
 from sqlalchemy import select
 
 from kshow.config import Settings
-from kshow.db import Episode, Grab, Show, SourceRow, init_db, utcnow
+from kshow.db import Episode, Grab, Show, SourceRow, get_setting, init_db, utcnow
 from kshow.notify import Notifier
 from kshow.pipeline import Deps, check_all_shows, check_show, select_releases
 from kshow.qbit import QbitClient
@@ -167,6 +168,13 @@ def mock_tvdb(tvdb_id, episodes, status="Continuing"):
     respx.get(f"{TVDB}/series/{tvdb_id}").respond(
         200, json={"data": {"status": {"name": status}}}
     )
+
+
+def sent(apprise) -> list[tuple[str, str]]:
+    return [
+        (body["title"], body["body"])
+        for body in (json.loads(c.request.content) for c in apprise.calls)
+    ]
 
 
 def episodes(db, show_id) -> dict[int, Episode]:
@@ -541,3 +549,103 @@ async def test_missing_downloaded_episode_is_not_regrabbed_automatically(db, htt
 
     assert add.call_count == 0
     assert episodes(db, show_id)[4].state == "downloaded"
+
+
+@respx.mock
+async def test_download_started_notifies(db, http, tmp_path):
+    mock_search("신인감독 김연경 2.E04.261101.720p-NEXT")
+    mock_post(1)
+    mock_qbit()
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db)
+
+    await check_show(make_deps(db, http, tmp_path), show_id)
+
+    assert sent(apprise) == [("Download started", "The Wonder Coach S02E04 (720p-NEXT)")]
+
+
+@respx.mock
+async def test_not_a_torrent_notifies_once_per_post(db, http, tmp_path):
+    mock_search("신인감독 김연경 2.E04.261101.720p-NEXT")
+    mock_post(1, body=b"<html>ad page</html>")
+    mock_qbit()
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db)
+    deps = make_deps(db, http, tmp_path)
+
+    await check_show(deps, show_id)
+    await check_show(deps, show_id)
+
+    assert sent(apprise) == [(
+        "Download failed",
+        "The Wonder Coach S02E04: the download link didn't return a torrent "
+        "(신인감독 김연경 2.E04.261101.720p-NEXT). kshow will try another release.",
+    )]
+
+
+@respx.mock
+async def test_qbit_problem_notifies_once_and_recovery_once(db, http, tmp_path):
+    mock_search("신인감독 김연경 2.E04.261101.720p-NEXT")
+    mock_post(1)
+    respx.post(f"{QBIT}/api/v2/auth/login").mock(
+        side_effect=[
+            httpx.ConnectError("refused"),
+            httpx.ConnectError("refused"),
+            httpx.ConnectError("refused"),
+            httpx.Response(200, text="Ok.", headers={"Set-Cookie": "SID=abc; path=/"}),
+        ]
+    )
+    respx.post(f"{QBIT}/api/v2/torrents/add").respond(200, text="Ok.")
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db)
+    deps = make_deps(db, http, tmp_path)
+
+    for _ in range(3):
+        await check_show(deps, show_id)
+
+    [(title, body)] = sent(apprise)
+    assert title == "qBittorrent problem"
+    assert body.startswith("kshow can't reach or log in to qBittorrent: ")
+    assert "refused" in body
+    assert body.endswith(". Downloads are paused until it works again.")
+    with db() as s:
+        assert get_setting(s, "qbit_outage_since") != ""
+
+    await check_show(deps, show_id)
+    await check_show(deps, show_id)  # nothing left to grab: no more notifications
+
+    assert sent(apprise)[1:] == [
+        ("qBittorrent back", "kshow can reach qBittorrent again."),
+        ("Download started", "The Wonder Coach S02E04 (720p-NEXT)"),
+    ]
+    with db() as s:
+        assert get_setting(s, "qbit_outage_since") == ""
+
+
+@respx.mock
+async def test_successful_add_without_outage_sends_no_recovery(db, http, tmp_path):
+    mock_search("신인감독 김연경 2.E04.261101.720p-NEXT")
+    mock_post(1)
+    mock_qbit()
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db)
+
+    await check_show(make_deps(db, http, tmp_path), show_id)
+
+    assert [t for t, _ in sent(apprise)] == ["Download started"]
+
+
+@respx.mock
+async def test_source_back_notifies_once(db, http, tmp_path):
+    mock_search()
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db)
+    with db() as s:
+        s.scalars(select(SourceRow)).one().unreachable_since = utcnow()
+        s.commit()
+    deps = make_deps(db, http, tmp_path)
+
+    await check_show(deps, show_id)
+    await check_show(deps, show_id)
+
+    assert sent(apprise) == [("Source back", "torrenttip is reachable again.")]

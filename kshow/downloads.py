@@ -12,6 +12,7 @@ from kshow.db import Episode, Grab, Show, get_setting, utcnow
 from kshow.library import VIDEO_EXTS, move_into_library, target_path
 from kshow.pipeline import Deps
 from kshow.qbit import QbitError, QbitFile, QbitTorrent
+from kshow.qbit_outage import qbit_failed, qbit_ok
 
 log = logging.getLogger(__name__)
 
@@ -229,6 +230,7 @@ async def process_downloads(deps: Deps) -> None:
         stall = timedelta(hours=float(get_setting(session, "stall_hours")))
         try:
             torrents = await deps.qbit.torrents(get_setting(session, "qbit_category"))
+            await qbit_ok(session, deps.notifier)
             for grab in grabs:
                 if grab.state == "add_failed":
                     await _adopt(session, deps, grab, torrents)
@@ -237,3 +239,4 @@ async def process_downloads(deps: Deps) -> None:
                     await _process(session, deps, grab, torrents, stall)
         except QbitError as e:
             log.warning("qBittorrent unavailable, download processing deferred: %s", e)
+            await qbit_failed(session, deps.notifier, e)

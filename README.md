@@ -99,8 +99,15 @@ Leave `APPRISE_TAG` unset unless you store the channel with a tag (`urls=kshow=t
 With a tag set, apprise-api only notifies channels carrying that tag, so an untagged channel
 gets nothing.
 
-kshow notifies when an episode is added to the library, a download fails, an episode is overdue,
-and a source becomes unreachable.
+kshow notifies when:
+
+- a download starts (show, episode, resolution and release group);
+- an episode is added to the library;
+- a download fails, stalls or can't be moved into the library;
+- a download link doesn't return a torrent (kshow then tries another release);
+- an episode is overdue;
+- qBittorrent can't be reached or logged in to (once per outage), and when it works again;
+- a source becomes unreachable, and when it is reachable again.
 
 ## Leaving `OIDC_ISSUER` unset
 

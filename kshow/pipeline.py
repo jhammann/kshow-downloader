@@ -14,6 +14,7 @@ from kshow.db import Episode, Grab, Show, SourceRow, get_setting, utcnow
 from kshow.library import existing_episodes
 from kshow.notify import Notifier
 from kshow.qbit import QbitClient, QbitError
+from kshow.qbit_outage import qbit_failed, qbit_ok
 from kshow.releases import normalize_title
 from kshow.sources.torrenttip import (
     Candidate,
@@ -137,6 +138,7 @@ async def _search(
         if row is not None and row.unreachable_since is not None:
             row.unreachable_since = None
             session.commit()
+            await deps.notifier.send("Source back", f"{source.name} is reachable again.")
         candidates.extend(found)
     return candidates
 
@@ -156,6 +158,7 @@ async def _grab(
             continue
         ep = _episode(session, show.id, number)
         session.commit()
+        label = f"{show.folder_name} S{show.tvdb_season:02}E{number:02}"
         try:
             data = await source.fetch_torrent(c.post_url)
             if not is_torrent(data):
@@ -175,6 +178,11 @@ async def _grab(
                 )
             )
             session.commit()
+            await deps.notifier.send(
+                "Download failed",
+                f"{label}: the download link didn't return a torrent ({c.release.raw}). "
+                "kshow will try another release.",
+            )
             continue
         # Retry an earlier failed add of this same post under its own grab and tag, so
         # repeated qBittorrent outages don't pile up rows.
@@ -209,7 +217,9 @@ async def _grab(
             log.warning("qBittorrent add failed, stopping grabs for %s: %s", show.folder_name, e)
             grab.state = "add_failed"
             session.commit()
+            await qbit_failed(session, deps.notifier, e)
             return
+        await qbit_ok(session, deps.notifier)
         grab.state = "downloading"
         grab.release_name = c.release.raw
         grab.progress = 0
@@ -217,6 +227,10 @@ async def _grab(
         ep.state = "downloading"
         session.commit()
         log.info("grabbed %s for %s E%02d", c.release.raw, show.folder_name, number)
+        quality = "-".join(p for p in (c.release.resolution, c.release.group) if p)
+        await deps.notifier.send(
+            "Download started", f"{label} ({quality})" if quality else label
+        )
 
 
 async def check_show(deps: Deps, show_id: int) -> None:

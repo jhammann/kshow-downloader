@@ -12,7 +12,7 @@ import respx
 from sqlalchemy import select
 
 from kshow.config import Settings
-from kshow.db import Episode, Grab, Show, init_db, set_setting, utcnow
+from kshow.db import Episode, Grab, Show, get_setting, init_db, set_setting, utcnow
 from kshow import downloads as downloads_module
 from kshow.downloads import map_path, process_downloads
 from kshow.notify import Notifier
@@ -709,3 +709,42 @@ async def test_move_runs_off_the_event_loop_thread(db, http, dirs, monkeypatch):
 
     assert (tv / DEST).read_bytes() == b"e"
     assert threads and threads[0] is not threading.main_thread()
+
+
+@respx.mock
+async def test_qbit_outage_in_downloads_notifies_once_and_recovery_once(db, http, dirs):
+    tag = add_grab(db, progress=0.5)
+    respx.post(f"{QBIT}/api/v2/auth/login").respond(
+        200, text="Ok.", headers={"Set-Cookie": "SID=abc; path=/"}
+    )
+    listing = [torrent(tag, 0.5, dirs[0])]
+    respx.get(f"{QBIT}/api/v2/torrents/info").mock(
+        side_effect=[
+            httpx.ConnectError("refused"),
+            httpx.ConnectError("refused"),
+            httpx.Response(200, json=listing),
+            httpx.Response(200, json=listing),
+        ]
+    )
+    apprise = respx.post(APPRISE).respond(200)
+    deps = make_deps(db, http, dirs)
+
+    await process_downloads(deps)
+    await process_downloads(deps)
+
+    assert apprise.call_count == 1
+    first = json.loads(apprise.calls.last.request.content)
+    assert first["title"] == "qBittorrent problem"
+    assert "refused" in first["body"]
+    with db() as s:
+        assert get_setting(s, "qbit_outage_since") != ""
+
+    await process_downloads(deps)
+    await process_downloads(deps)
+
+    assert apprise.call_count == 2
+    assert json.loads(apprise.calls.last.request.content) == {
+        "title": "qBittorrent back", "body": "kshow can reach qBittorrent again.",
+    }
+    with db() as s:
+        assert get_setting(s, "qbit_outage_since") == ""
