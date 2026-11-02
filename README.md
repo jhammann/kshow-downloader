@@ -85,7 +85,9 @@ Each show has its seasons listed on its page. What kshow downloads without you a
   Korean date, since air dates are Korean broadcast dates). Older episodes are never fetched
   by themselves; use Search for those.
 - Seasons from the one you picked onwards are followed. Earlier seasons are listed but not
-  followed.
+  followed. If TVDB can't be reached while you add the show, only the picked season is listed
+  at first; the first check that reaches TVDB adds the others, following the later ones from
+  the day you added the show (without a "New season" notification).
 - A season that TVDB announces later is followed automatically, including episodes that
   aired up to 14 days before kshow noticed it (TVDB often adds a season a little late). You
   get a "New season" notification.
@@ -93,7 +95,8 @@ Each show has its seasons listed on its page. What kshow downloads without you a
 - Episodes you deleted are never fetched again by themselves.
 
 Each season has a **Following new episodes** switch. Turn it off to stop automatic downloads
-for that season; Search still works. A stopped or finished show has a **Follow again** button.
+for that season; Search still works. A stopped or finished show has a **Follow again** button
+when at least one of its seasons is followed.
 
 ## Searching by hand
 
@@ -106,8 +109,10 @@ Search works on every show and season, whether it is followed, stopped or finish
 - Search season skips episodes you already had (shown as Missing, for example because you
   deleted them) and episodes that haven't aired yet. A deleted episode is only fetched with its
   own Search button, so one tap can't bring back everything you watched and deleted.
-- If a download you asked for fails later, kshow notifies you and does not try again. The
-  episode goes back to Not downloaded.
+- If a download you asked for fails later, kshow notifies you. For an episode kshow isn't
+  following, it does not try again and the episode goes back to Not downloaded. For an episode
+  of a followed season that kshow fetches by itself, it tries another release and the episode
+  shows Wanted.
 
 ### Release names use season
 
@@ -120,12 +125,15 @@ use a different number than TVDB does.
 | Label | Meaning |
 | --- | --- |
 | In Plex | The episode is in your library. |
-| Missing | kshow filed it before, but the file is gone from the library. |
+| Missing | The episode was downloaded (filed by kshow or found in the season folder), but the file is gone from the library. |
 | Downloading NN% | The torrent is downloading. |
-| Wanted | kshow will fetch it by itself (followed season, not downloaded yet). |
+| Wanted | kshow will fetch it by itself (followed season of a followed show, not downloaded yet). |
 | Not downloaded | Nothing is fetched by itself; use Search if you want it. |
 | Not aired yet | The episode airs later. |
-| Failed | The download failed. Use Search to try again. |
+| Failed | Only on episodes that failed before this version (from the old database). Use Search to try again. |
+
+When a download fails, the episode shows Wanted or Not downloaded (as above), and the release
+name under it ends in "— failed".
 
 ## Upgrading
 
@@ -160,7 +168,8 @@ kshow notifies when:
 - a download starts (show, episode, resolution and release group);
 - an episode is added to the library;
 - a download fails, stalls or can't be moved into the library;
-- a download link doesn't return a torrent (kshow then tries another release);
+- a download link doesn't return a torrent (when kshow is following that episode, it then
+  tries another release);
 - an episode is overdue;
 - a search finds no release ("No release found");
 - a search can't run because no source is reachable ("Search failed");
