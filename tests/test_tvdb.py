@@ -218,3 +218,55 @@ async def test_season_with_no_episodes_is_empty(client):
         return_value=httpx.Response(200, json={"data": {"episodes": []}})
     )
     assert await client.season_episodes(9, 1) == []
+
+
+@respx.mock
+async def test_all_episodes_follows_pages_and_skips_specials(client):
+    respx.post(f"{BASE}/login").mock(return_value=login_ok())
+    route = respx.get(f"{BASE}/series/7/episodes/default").mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "episodes": [
+                            {"number": 1, "seasonNumber": 1, "aired": "2025-10-01"},
+                            {"number": 1, "seasonNumber": 0, "aired": "2025-09-01"},
+                        ]
+                    },
+                    "links": {"next": "https://api4.thetvdb.com/v4/series/7/episodes/default?page=1"},
+                },
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "data": {"episodes": [{"number": 2, "seasonNumber": 2, "aired": None}]},
+                    "links": {"next": None},
+                },
+            ),
+        ]
+    )
+    eps = await client.all_episodes(7)
+    assert [(e.season, e.number, e.aired) for e in eps] == [
+        (1, 1, date(2025, 10, 1)),
+        (2, 2, None),
+    ]
+    assert [c.request.url.params["page"] for c in route.calls] == ["0", "1"]
+
+
+@respx.mock
+async def test_all_episodes_malformed_raises(client):
+    respx.post(f"{BASE}/login").mock(return_value=login_ok())
+    respx.get(f"{BASE}/series/7/episodes/default").mock(
+        return_value=httpx.Response(200, json={"data": {"episodes": "nope"}})
+    )
+    with pytest.raises(TvdbError):
+        await client.all_episodes(7)
+
+
+@respx.mock
+async def test_all_episodes_404_raises(client):
+    respx.post(f"{BASE}/login").mock(return_value=login_ok())
+    respx.get(f"{BASE}/series/9/episodes/default").mock(return_value=httpx.Response(404))
+    with pytest.raises(TvdbError):
+        await client.all_episodes(9)

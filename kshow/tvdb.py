@@ -11,6 +11,7 @@ import httpx
 log = logging.getLogger(__name__)
 
 BASE_URL = "https://api4.thetvdb.com/v4"
+MAX_EPISODE_PAGES = 20
 _SLUG_URL = re.compile(r"/series/([^/?#]+)")
 
 
@@ -64,6 +65,7 @@ class TvdbMatch:
 class TvdbEpisode:
     number: int
     aired: date | None
+    season: int = 0
 
 
 class TvdbClient:
@@ -201,6 +203,34 @@ class TvdbClient:
                 except ValueError:
                     log.warning("Bad aired date %r for series %s", ep["aired"], series_id)
             episodes.append(TvdbEpisode(number=ep["number"], aired=aired))
+        return episodes
+
+    async def all_episodes(self, series_id: int) -> list[TvdbEpisode]:
+        """Every episode of every real season (specials, season 0, are skipped)."""
+        episodes: list[TvdbEpisode] = []
+        for page in range(MAX_EPISODE_PAGES):
+            resp = await self._get(f"/series/{series_id}/episodes/default", {"page": page})
+            if resp.status_code == 404:
+                raise TvdbError(f"TVDB series {series_id} not found")
+            eps = self._data(resp).get("episodes") or []
+            if not isinstance(eps, list):
+                raise TvdbError("TVDB episodes is not a list")
+            for ep in eps:
+                if not isinstance(ep, dict):
+                    continue
+                season, number = ep.get("seasonNumber"), ep.get("number")
+                if not isinstance(season, int) or not season or number is None:
+                    continue
+                aired = None
+                if isinstance(ep.get("aired"), str):
+                    try:
+                        aired = date.fromisoformat(ep["aired"])
+                    except ValueError:
+                        log.warning("Bad aired date %r for series %s", ep["aired"], series_id)
+                episodes.append(TvdbEpisode(number=number, aired=aired, season=season))
+            links = resp.json().get("links")
+            if not (isinstance(links, dict) and links.get("next")):
+                break
         return episodes
 
     async def is_ended(self, series_id: int) -> bool:
