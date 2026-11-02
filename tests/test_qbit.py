@@ -78,9 +78,26 @@ async def test_login_accepts_qbittorrent_5_no_content_reply(client):
     assert info.calls[0].request.headers["cookie"] == "SID=v5"
 
 
+@respx.mock
+async def test_login_accepts_qbittorrent_5_port_named_session_cookie(client, http):
+    # qBittorrent 5.x names the session cookie QBT_SID_<port> (seen live on 5.3.0)
+    respx.post(f"{API}/auth/login").mock(
+        return_value=httpx.Response(
+            204,
+            headers={"Set-Cookie": "QBT_SID_8089=v5sid; HttpOnly; SameSite=Lax; path=/"},
+        )
+    )
+    info = respx.get(f"{API}/torrents/info").mock(return_value=httpx.Response(200, json=[]))
+    assert await client.torrents("kshow") == []
+    assert info.calls[0].request.headers["cookie"] == "QBT_SID_8089=v5sid"
+    # the session cookie stays private to the qBittorrent client
+    assert not any(c.name.startswith("QBT_SID_") for c in http.cookies.jar)
+
+
 @pytest.mark.parametrize(
     "reply",
     [
+        httpx.Response(204, headers={"Set-Cookie": "OTHER=x; path=/"}),  # no session cookie
         httpx.Response(401),  # 5.x: wrong credentials
         httpx.Response(403),  # banned after too many failures
         httpx.Response(200, text="Fails."),  # 4.x: wrong credentials

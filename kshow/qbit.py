@@ -11,6 +11,12 @@ log = logging.getLogger(__name__)
 # Statuses from /torrents/add that mean "refused this torrent", not "qBittorrent is down".
 _ADD_REJECTED = (400, 409, 415)
 _HASH = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$", re.IGNORECASE)
+# Session cookie: "SID" on qBittorrent 4.x, "QBT_SID_<port>" on 5.x.
+_SESSION_COOKIE = re.compile(r"^(?:SID|QBT_SID_\d+)$")
+
+
+def _is_session_cookie(name: str) -> bool:
+    return bool(_SESSION_COOKIE.match(name))
 
 
 class QbitError(Exception):
@@ -42,13 +48,14 @@ class QbitClient:
         self._username = username
         self._password = password
         self._http = http
-        # Kept privately and sent per request so it never lives in the shared jar.
-        self._sid: str | None = None
+        # Session cookie as (name, value), kept privately and sent per request so it never
+        # lives in the shared jar.
+        self._sid: tuple[str, str] | None = None
 
     async def _send(self, method: str, path: str, **kwargs) -> httpx.Response:
         headers = {"Referer": self._url}
         if self._sid:
-            headers["Cookie"] = f"SID={self._sid}"
+            headers["Cookie"] = "=".join(self._sid)
         try:
             return await self._http.request(
                 method, f"{self._url}/api/v2{path}", headers=headers, **kwargs
@@ -64,16 +71,20 @@ class QbitClient:
             data={"username": self._username, "password": self._password},
         )
         # qBittorrent 4.x replies 200 "Ok." (or "Fails."); 5.x replies 204 with no body (401 on
-        # bad credentials). Either way a real login hands out a SID cookie, checked below.
+        # bad credentials). Either way a real login hands out a session cookie, checked below.
         if not resp.is_success or resp.text.strip() not in ("Ok.", ""):
             raise QbitError(f"qBittorrent login failed (HTTP {resp.status_code})")
-        sid = resp.cookies.get("SID")
-        if not sid:
-            raise QbitError("qBittorrent login returned no SID cookie")
+        # 4.x names it SID; 5.x names it QBT_SID_<port>.
+        sid = next(
+            ((name, value) for name, value in resp.cookies.items() if _is_session_cookie(name)),
+            None,
+        )
+        if not sid or not sid[1]:
+            raise QbitError("qBittorrent login returned no session cookie")
         self._sid = sid
         # httpx stores Set-Cookie in the shared jar; drop it so it stays private.
         for cookie in list(self._http.cookies.jar):
-            if cookie.name == "SID":
+            if _is_session_cookie(cookie.name):
                 self._http.cookies.jar.clear(cookie.domain, cookie.path, cookie.name)
 
     async def _request(
