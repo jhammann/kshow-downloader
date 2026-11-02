@@ -226,7 +226,9 @@ def test_migrates_episode_states_to_monitored(tmp_path):
         assert s.get(Episode, EP_ID[6]).monitored is True
         assert s.get(Episode, EP_ID[1]).monitored is False
         [season] = s.scalars(select(Season)).all()
-        assert season.followed is False
+        # Followed, so the show page offers Follow again; a stopped show is never checked.
+        assert season.followed is True
+        assert season.followed_since == date(2026, 10, 20)
         assert season.show.status == "stopped"
 
 
@@ -358,7 +360,9 @@ def test_v1_db_without_runtime_added_columns(tmp_path):
         assert show.poster_url is None and show.tvdb_id is None and show.max_known_season == 3
         [season] = show.seasons
         assert (season.number, season.release_season, season.folder) == (3, 1, "Season 03")
-        assert season.followed is False and season.first_aired is None
+        # A finished show's season stays followed: a new season brings the show back.
+        assert season.followed is True and season.first_aired is None
+        assert season.followed_since == date(2026, 10, 1)
         assert s.get(Episode, 1).season is season
     grab_cols = [r[1] for r in sql(path, "PRAGMA table_info(grabs)")]
     assert grab_cols.count("missing_since") == 1

@@ -133,11 +133,13 @@ def _copy_v1_rows(con: sqlite3.Connection) -> None:
         " SELECT id, search_title, tvdb_id, folder_name, status,"
         f" {_col(shows, 'poster_url')}, added_at, tvdb_season FROM shows_v1"
     )
-    # One season per v1 show, with the show's id so episodes can follow by show_id.
+    # One season per v1 show, with the show's id so episodes can follow by show_id. It is
+    # followed whatever the show's status: a stopped show is never checked but offers
+    # Follow again, and a finished show comes back when TVDB adds a season.
     con.execute(
         "INSERT INTO seasons (id, show_id, number, release_season, folder, followed,"
         " followed_since, first_aired)"
-        " SELECT id, id, tvdb_season, release_season, season_folder, status = 'following',"
+        " SELECT id, id, tvdb_season, release_season, season_folder, 1,"
         f" date(added_at), {_col(shows, 'season_first_aired')} FROM shows_v1"
     )
     con.execute(
