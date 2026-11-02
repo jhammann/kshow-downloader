@@ -8,6 +8,8 @@ import httpx
 
 log = logging.getLogger(__name__)
 
+# Statuses from /torrents/add that mean "refused this torrent", not "qBittorrent is down".
+_ADD_REJECTED = (400, 409, 415)
 _HASH = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$", re.IGNORECASE)
 
 
@@ -116,23 +118,24 @@ class QbitClient:
             "/torrents/add",
             files={"torrents": (filename, data, "application/x-bittorrent")},
             data={"category": category, "savepath": save_path, "tags": tag},
-            allow=(409,),
+            allow=_ADD_REJECTED,
         )
         # Web API < 2.14 answers "Ok." / "Fails."; qBittorrent 5.2+ (API 2.14) answers
-        # JSON counts, or HTTP 409 when nothing was added.
+        # JSON counts, or HTTP 409 when nothing was added. 400/415: not a usable torrent.
+        # Any of these means qBittorrent is up but refused this torrent.
         text = resp.text.strip()
-        if resp.status_code == 409:
-            raise QbitRejected(f"qBittorrent rejected torrent (HTTP 409): {text[:200]!r}")
+        if resp.status_code in _ADD_REJECTED:
+            raise QbitRejected(
+                f"qBittorrent rejected torrent (HTTP {resp.status_code}): {text[:200]!r}"
+            )
         if text == "Ok.":
             return
-        if text == "Fails.":
-            raise QbitRejected("qBittorrent rejected torrent: 'Fails.'")
         try:
             body = resp.json()
             success = int(body["success_count"]) + int(body["pending_count"])
             failures = int(body["failure_count"])
         except (ValueError, KeyError, TypeError):
-            raise QbitError(f"qBittorrent add returned unexpected reply: {text[:200]!r}") from None
+            raise QbitRejected(f"qBittorrent rejected torrent: {text[:200]!r}") from None
         if failures > 0 or success < 1:
             raise QbitRejected(f"qBittorrent rejected torrent: {text[:200]!r}")
 

@@ -230,13 +230,21 @@ async def process_downloads(deps: Deps) -> None:
         stall = timedelta(hours=float(get_setting(session, "stall_hours")))
         try:
             torrents = await deps.qbit.torrents(get_setting(session, "qbit_category"))
-            await qbit_ok(session, deps.notifier)
-            for grab in grabs:
-                if grab.state == "add_failed":
-                    await _adopt(session, deps, grab, torrents)
-            for grab in grabs:
-                if grab.state == "downloading":
-                    await _process(session, deps, grab, torrents, stall)
         except QbitError as e:
             log.warning("qBittorrent unavailable, download processing deferred: %s", e)
             await qbit_failed(session, deps.notifier, e)
+            return
+        await qbit_ok(session, deps.notifier)
+        # qBittorrent answered the listing; a failure on one torrent is not an outage.
+        for grab in grabs:
+            if grab.state == "add_failed":
+                try:
+                    await _adopt(session, deps, grab, torrents)
+                except QbitError as e:
+                    log.warning("qBittorrent call for %s failed; retrying: %s", grab.qbit_tag, e)
+        for grab in grabs:
+            if grab.state == "downloading":
+                try:
+                    await _process(session, deps, grab, torrents, stall)
+                except QbitError as e:
+                    log.warning("qBittorrent call for %s failed; retrying: %s", grab.qbit_tag, e)

@@ -748,3 +748,30 @@ async def test_qbit_outage_in_downloads_notifies_once_and_recovery_once(db, http
     }
     with db() as s:
         assert get_setting(s, "qbit_outage_since") == ""
+
+
+@respx.mock
+async def test_qbit_error_on_one_grab_is_not_an_outage(db, http, dirs):
+    old = utcnow() - timedelta(hours=7)
+    tag4 = add_grab(db, progress=0.2, last_progress_at=old, number=4)
+    tag5 = add_grab(db, progress=0.2, last_progress_at=old, number=5)
+    respx.post(f"{QBIT}/api/v2/auth/login").respond(
+        200, text="Ok.", headers={"Set-Cookie": "SID=abc; path=/"}
+    )
+    respx.get(f"{QBIT}/api/v2/torrents/info").respond(
+        200,
+        json=[torrent(tag4, 0.2, dirs[0], hash=HASH), torrent(tag5, 0.2, dirs[0], hash=HASH2)],
+    )
+    respx.post(f"{QBIT}/api/v2/torrents/delete").mock(
+        side_effect=[httpx.ConnectError("hiccup"), httpx.Response(200)]
+    )
+    apprise = respx.post(APPRISE).respond(200)
+
+    await process_downloads(make_deps(db, http, dirs))
+
+    assert state(db, tag4)[0].state == "downloading"  # retried next poll
+    assert state(db, tag5)[0].state == "failed"
+    titles = [json.loads(c.request.content)["title"] for c in apprise.calls]
+    assert titles == ["Download failed"]
+    with db() as s:
+        assert get_setting(s, "qbit_outage_since") == ""

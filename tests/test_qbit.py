@@ -268,10 +268,13 @@ async def test_add_accepts_v2_14_json_success(client, counts):
             ),
             True,
         ),
-        (httpx.Response(200, json={"unexpected": True}), False),
-        (httpx.Response(200, json=[1, 2]), False),
-        (httpx.Response(200, text="garbage"), False),
+        (httpx.Response(200, json={"unexpected": True}), True),
+        (httpx.Response(200, json=[1, 2]), True),
+        (httpx.Response(200, text="garbage"), True),
+        (httpx.Response(400, text="bad torrent"), True),
+        (httpx.Response(415, text="not a torrent"), True),
         (httpx.Response(500, text="boom"), False),
+        (httpx.Response(502, text="bad gateway"), False),
     ],
 )
 async def test_add_rejections_raise(client, response, rejected):
@@ -288,4 +291,22 @@ async def test_409_outside_add_is_a_plain_error(client):
     respx.get(f"{API}/torrents/info").mock(return_value=httpx.Response(409))
     with pytest.raises(QbitError) as info:
         await client.torrents("kshow")
+    assert not isinstance(info.value, QbitRejected)
+
+
+@respx.mock
+async def test_add_403_after_relogin_is_a_plain_error(client):
+    respx.post(f"{API}/auth/login").mock(return_value=login_ok())
+    respx.post(f"{API}/torrents/add").mock(return_value=httpx.Response(403))
+    with pytest.raises(QbitError) as info:
+        await client.add_torrent(b"x", "a.torrent", "kshow", "/dl", "t")
+    assert not isinstance(info.value, QbitRejected)
+
+
+@respx.mock
+async def test_add_transport_error_is_a_plain_error(client):
+    respx.post(f"{API}/auth/login").mock(return_value=login_ok())
+    respx.post(f"{API}/torrents/add").mock(side_effect=httpx.ConnectError("down"))
+    with pytest.raises(QbitError) as info:
+        await client.add_torrent(b"x", "a.torrent", "kshow", "/dl", "t")
     assert not isinstance(info.value, QbitRejected)

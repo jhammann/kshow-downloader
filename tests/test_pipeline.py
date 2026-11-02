@@ -290,7 +290,7 @@ async def test_qbit_add_failure_then_retry_reuses_grab_and_tag(db, http, tmp_pat
     add = respx.post(f"{QBIT}/api/v2/torrents/add").mock(
         side_effect=[
             httpx.ReadTimeout("slow"),
-            httpx.Response(409, text="Fails."),
+            httpx.Response(503, text="Service Unavailable"),
             httpx.Response(
                 200,
                 json={"success_count": 1, "failure_count": 0, "pending_count": 0,
@@ -358,7 +358,7 @@ async def test_qbit_rejects_torrent_keeps_episode_wanted(db, http, tmp_path):
 
     assert episodes(db, show_id)[4].state == "wanted"
     with db() as s:
-        assert s.scalars(select(Grab)).one().state == "add_failed"
+        assert s.scalars(select(Grab)).one().state == "failed"
 
 
 @respx.mock
@@ -651,13 +651,26 @@ async def test_source_back_notifies_once(db, http, tmp_path):
     assert sent(apprise) == [("Source back", "torrenttip is reachable again.")]
 
 
+REJECTED = (
+    "The Wonder Coach S02E04: qBittorrent rejected the torrent "
+    "(신인감독 김연경 2.E04.261101.720p-{}).",
+)
+
+
 @respx.mock
 @pytest.mark.parametrize(
-    "rejection", [httpx.Response(409, text="Fails."), httpx.Response(200, text="Fails.")]
+    "rejection",
+    [
+        httpx.Response(409, text="Fails."),
+        httpx.Response(200, text="Fails."),
+        httpx.Response(400, text="bad torrent"),
+        httpx.Response(415, text="unsupported"),
+    ],
 )
-async def test_qbit_rejection_is_not_an_outage(db, http, tmp_path, rejection):
-    mock_search("신인감독 김연경 2.E04.261101.720p-NEXT")
+async def test_qbit_rejection_is_not_an_outage_and_moves_on(db, http, tmp_path, rejection):
+    mock_search("신인감독 김연경 2.E04.261101.720p-NEXT", "신인감독 김연경 2.E04.261101.720p-ODD")
     mock_post(1)
+    mock_post(2)
     respx.post(f"{QBIT}/api/v2/auth/login").respond(
         200, text="Ok.", headers={"Set-Cookie": "SID=abc; path=/"}
     )
@@ -666,19 +679,45 @@ async def test_qbit_rejection_is_not_an_outage(db, http, tmp_path, rejection):
     show_id = add_show(db)
     deps = make_deps(db, http, tmp_path)
 
-    await check_show(deps, show_id)
-    await check_show(deps, show_id)  # the add_failed grab is reused: no second notification
+    for _ in range(3):  # each post is tried once, then there is nothing left
+        await check_show(deps, show_id)
 
     assert add.call_count == 2
-    assert sent(apprise) == [(
-        "Download failed",
-        "The Wonder Coach S02E04: qBittorrent rejected the torrent "
-        "(신인감독 김연경 2.E04.261101.720p-NEXT).",
-    )]
+    assert [b"-NEXT.torrent" in c.request.content for c in add.calls] == [True, False]
+    assert sent(apprise) == [
+        ("Download failed", REJECTED[0].format("NEXT")),
+        ("Download failed", REJECTED[0].format("ODD")),
+    ]
     assert episodes(db, show_id)[4].state == "wanted"
     with db() as s:
-        assert s.scalars(select(Grab)).one().state == "add_failed"
+        assert [g.state for g in s.scalars(select(Grab))] == ["failed", "failed"]
         assert get_setting(s, "qbit_outage_since") == ""
+
+
+@respx.mock
+async def test_outage_then_rejection_on_same_post_notifies_rejection_once(db, http, tmp_path):
+    mock_search("신인감독 김연경 2.E04.261101.720p-NEXT")
+    mock_post(1)
+    respx.post(f"{QBIT}/api/v2/auth/login").mock(
+        side_effect=[
+            httpx.ConnectError("refused"),
+            httpx.Response(200, text="Ok.", headers={"Set-Cookie": "SID=abc; path=/"}),
+        ]
+    )
+    respx.post(f"{QBIT}/api/v2/torrents/add").respond(200, text="Fails.")
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db)
+    deps = make_deps(db, http, tmp_path)
+
+    for _ in range(3):
+        await check_show(deps, show_id)
+
+    assert [t for t, _ in sent(apprise)] == [
+        "qBittorrent problem", "qBittorrent back", "Download failed",
+    ]
+    assert sent(apprise)[2][1] == REJECTED[0].format("NEXT")
+    with db() as s:
+        assert s.scalars(select(Grab)).one().state == "failed"
 
 
 @respx.mock

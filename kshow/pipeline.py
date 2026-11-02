@@ -214,17 +214,16 @@ async def _grab(
                 tag=grab.qbit_tag,
             )
         except QbitRejected as e:
-            # qBittorrent is up; adoption picks the torrent up if it was added after all.
+            # qBittorrent is up and added nothing: mark the post failed so the next check
+            # moves on to another release.
             log.warning("qBittorrent rejected %s: %s", c.release.raw, e)
-            first_failure = grab.state != "add_failed"  # a reused grab was reported already
-            grab.state = "add_failed"
+            grab.state = "failed"
             session.commit()
             await qbit_ok(session, deps.notifier)
-            if first_failure:
-                await deps.notifier.send(
-                    "Download failed",
-                    f"{label}: qBittorrent rejected the torrent ({c.release.raw}).",
-                )
+            await deps.notifier.send(
+                "Download failed",
+                f"{label}: qBittorrent rejected the torrent ({c.release.raw}).",
+            )
             continue
         except QbitError as e:
             log.warning("qBittorrent add failed, stopping grabs for %s: %s", show.folder_name, e)
