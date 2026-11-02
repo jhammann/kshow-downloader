@@ -135,6 +135,24 @@ use a different number than TVDB does.
 When a download fails, the episode shows Wanted or Not downloaded (as above), and the release
 name under it ends in "— failed".
 
+## Deleting a show
+
+**Delete show**, at the bottom of a show's page, opens a confirm page. Deleting a show:
+
+- makes kshow forget the show, its seasons and its download history;
+- stops the show's downloads that are still running in qBittorrent and removes their partial
+  files. Only torrents in kshow's category that carry one of this show's `kshow-<id>` tags are
+  touched. If qBittorrent can't be reached, nothing is deleted; try again later.
+
+The show's folder in the TV library stays, unless you tick **Also delete the folder from the TV
+library** (off by default). The confirm page shows the exact path and how many files are in it.
+kshow refuses to delete the folder (and then deletes nothing at all) when it is a symlink, isn't
+directly inside `/tv`, doesn't exist, or is also used by another show. Symlinks inside the folder
+are removed, never followed. If removing the folder fails part-way, the show is still forgotten
+and the show list says so; check what is left of the folder.
+
+The delete waits for a running check or download pass to finish first.
+
 ## Upgrading
 
 The first start of this version converts the database automatically. It first writes a backup
@@ -175,7 +193,8 @@ kshow notifies when:
 - a search can't run because no source is reachable ("Search failed");
 - TVDB announces a new season and kshow starts following it ("New season");
 - qBittorrent can't be reached or logged in to (once per outage), and when it works again;
-- a source becomes unreachable, and when it is reachable again.
+- a source becomes unreachable, and when it is reachable again;
+- a show is deleted ("Show deleted").
 
 ## Leaving `OIDC_ISSUER` unset
 

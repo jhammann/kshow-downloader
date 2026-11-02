@@ -1,4 +1,6 @@
+import os
 from datetime import date, timedelta
+from pathlib import Path
 
 import httpx
 import pytest
@@ -1449,3 +1451,405 @@ def test_refollow_resets_monitoring_to_from_today(client, today):
     client.post(f"/shows/{show_id}/seasons/1/follow", data={"followed": "1"})
     monitored = {n: _episode_row(client, show_id, n, season=1).monitored for n in range(1, 5)}
     assert monitored == {1: False, 2: True, 3: False, 4: True}
+
+
+# --- deleting a show --------------------------------------------------------------
+
+QBIT = "http://qbit:8080"
+APPRISE = "http://apprise:8000/notify/kshow"
+H1, H2, H3, H4 = ("a" * 40, "b" * 40, "c" * 40, "d" * 40)
+FOLDER = "The Wonder Coach"
+
+
+@pytest.fixture
+def del_client(settings, triggered, searched):
+    settings = settings.model_copy(update={"qbit_url": QBIT, "apprise_url": APPRISE})
+    with TestClient(create_app(settings), follow_redirects=False) as c:
+        yield c
+
+
+def _tv(client) -> Path:
+    return client.app.state.settings.tv_dir
+
+
+def _library_folder(
+    client, name=FOLDER, files=("Season 2/a.mkv", "Season 2/a.srt", "poster.jpg")
+):
+    folder = _tv(client) / name
+    for f in files:
+        (folder / f).parent.mkdir(parents=True, exist_ok=True)
+        (folder / f).write_text("x")
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _grab(client, ep_id, state="downloading") -> str:
+    """A grab tagged like the pipeline does: kshow-<grab id>."""
+    with _session(client) as s:
+        g = Grab(episode_id=ep_id, post_url=f"u{ep_id}{state}", release_name="r", qbit_tag="",
+                 state=state)
+        s.add(g)
+        s.flush()
+        g.qbit_tag = f"kshow-{g.id}"
+        s.commit()
+        return g.qbit_tag
+
+
+def _torrent(hash, tags):
+    return {"hash": hash, "tags": tags, "progress": 0.5, "state": "downloading",
+            "save_path": "/downloads/kshow"}
+
+
+def _mock_qbit(torrents):
+    """qBittorrent answering for category kshow only, plus Apprise. Returns (delete, apprise)."""
+    respx.post(f"{QBIT}/api/v2/auth/login").respond(
+        200, text="Ok.", headers={"Set-Cookie": "SID=abc; path=/"}
+    )
+    respx.get(f"{QBIT}/api/v2/torrents/info", params={"category": "kshow"}).respond(
+        200, json=torrents
+    )
+    return (
+        respx.post(f"{QBIT}/api/v2/torrents/delete").respond(200),
+        respx.post(APPRISE).respond(200),
+    )
+
+
+def _deleted_hashes(delete_route) -> list[tuple[str, str]]:
+    from urllib.parse import parse_qs
+
+    out = []
+    for call in delete_route.calls:
+        form = parse_qs(call.request.content.decode())
+        out.append((form["hashes"][0], form["deleteFiles"][0]))
+    return out
+
+
+def _delete(client, show_id, delete_folder="0", **kw):
+    return client.post(f"/shows/{show_id}/delete", data={"delete_folder": delete_folder}, **kw)
+
+
+def _shows(client) -> set[str]:
+    with _session(client) as s:
+        return {sh.folder_name for sh in s.scalars(select(Show))}
+
+
+def _checkbox(html: str) -> str:
+    import re
+
+    m = re.search(r'<input[^>]*name="delete_folder"[^>]*>', html)
+    assert m, "no delete_folder checkbox"
+    return m.group(0)
+
+
+def test_show_page_links_to_delete(client):
+    show_id = _add_show(client)
+    r = client.get(f"/shows/{show_id}")
+    assert f'href="/shows/{show_id}/delete"' in r.text
+    assert "Delete show" in r.text
+
+
+def test_delete_confirm_page_shows_path_and_file_count(client):
+    show_id = _add_show(client)
+    _library_folder(client)
+    r = client.get(f"/shows/{show_id}/delete")
+    assert r.status_code == 200
+    assert FOLDER in r.text
+    assert "kshow forgets this show, its seasons and download history" in r.text
+    assert (
+        "Downloads still running for this show are stopped and their partial files removed"
+        in r.text
+    )
+    assert "Also delete the folder from the TV library" in r.text
+    assert f"{_tv(client)}/{FOLDER}" in r.text
+    assert "3 files" in r.text
+    box = _checkbox(r.text)
+    assert 'type="checkbox"' in box and 'value="1"' in box
+    assert "checked" not in box and "disabled" not in box
+    assert f'href="/shows/{show_id}"' in r.text  # Cancel
+    assert f'action="/shows/{show_id}/delete"' in r.text
+
+
+def test_delete_confirm_page_without_folder(client):
+    show_id = _add_show(client)
+    r = client.get(f"/shows/{show_id}/delete")
+    assert r.status_code == 200
+    assert "Folder not found" in r.text
+    assert f"{_tv(client)}/{FOLDER}" in r.text
+    assert "disabled" in _checkbox(r.text)
+
+
+def test_delete_confirm_page_counts_one_file(client):
+    show_id = _add_show(client)
+    _library_folder(client, files=("a.mkv",))
+    assert "1 file" in client.get(f"/shows/{show_id}/delete").text
+
+
+@respx.mock
+def test_delete_show_keeps_folder_and_stops_its_downloads(del_client):
+    client = del_client
+    show_id = _add_show(client)
+    other_id = _add_show(client, folder_name="Other Show", tvdb_id=456)
+    ep1 = _add_ep(client, show_id, 1, state="downloading")
+    ep2 = _add_ep(client, show_id, 2)
+    tag1 = _grab(client, ep1)
+    tag2 = _grab(client, ep2, state="add_failed")
+    _grab(client, ep2, state="failed")
+    other_tag = _grab(client, _add_ep(client, other_id, 1, state="downloading"))
+    folder = _library_folder(client)
+    delete, apprise = _mock_qbit([
+        _torrent(H1, tag1),
+        _torrent(H2, f"foo, {tag2}"),
+        _torrent(H3, other_tag),
+        _torrent(H4, ""),  # not ours
+    ])
+    r = _delete(client, show_id)
+    assert r.status_code == 303
+    assert r.headers["location"].startswith("/?")
+    assert "folder_error" not in r.headers["location"]
+    assert sorted(_deleted_hashes(delete)) == [(H1, "true"), (H2, "true")]
+    assert _shows(client) == {"Other Show"}
+    with _session(client) as s:
+        assert {g.qbit_tag for g in s.scalars(select(Grab))} == {other_tag}
+        assert len(s.scalars(select(Episode)).all()) == 1
+        assert {se.show_id for se in s.scalars(select(Season))} == {other_id}
+    assert sorted(p.name for p in folder.rglob("*")) == ["Season 2", "a.mkv", "a.srt", "poster.jpg"]
+    assert _apprise_json(apprise) == {
+        "title": "Show deleted",
+        "body": f"{FOLDER} was removed from kshow",
+    }
+    assert client.get(f"/shows/{show_id}").status_code == 404
+
+
+def _apprise_json(apprise):
+    import json
+
+    return json.loads(apprise.calls.last.request.content)
+
+
+@respx.mock
+def test_delete_show_with_folder(del_client):
+    client = del_client
+    show_id = _add_show(client)
+    _add_show(client, folder_name="Other Show", tvdb_id=456)
+    folder = _library_folder(client)
+    other = _library_folder(client, "Other Show")
+    unrelated = _library_folder(client, "Not Followed", files=("x.mkv",))
+    _, apprise = _mock_qbit([])
+    r = _delete(client, show_id, "1")
+    assert r.status_code == 303
+    assert "folder_error" not in r.headers["location"]
+    assert not folder.exists()
+    assert (other / "poster.jpg").exists() and (unrelated / "x.mkv").exists()
+    assert _tv(client).is_dir()
+    assert _shows(client) == {"Other Show"}
+    assert _apprise_json(apprise) == {
+        "title": "Show deleted",
+        "body": f"{FOLDER} was removed from kshow and its folder was deleted from the TV library",
+    }
+
+
+@pytest.mark.parametrize("value", ["yes", "on", "true", "01", " 1", ""])
+@respx.mock
+def test_delete_folder_needs_exactly_1(del_client, value):
+    client = del_client
+    show_id = _add_show(client)
+    folder = _library_folder(client)
+    _mock_qbit([])
+    assert _delete(client, show_id, value).status_code == 303
+    assert (folder / "poster.jpg").exists()
+    assert _shows(client) == set()
+
+
+@respx.mock
+def test_delete_without_form_field_keeps_folder(del_client):
+    client = del_client
+    show_id = _add_show(client)
+    folder = _library_folder(client)
+    _mock_qbit([])
+    assert client.post(f"/shows/{show_id}/delete").status_code == 303
+    assert (folder / "poster.jpg").exists()
+
+
+def _assert_refused(client, show_id, delete_route, status=400):
+    r = _delete(client, show_id, "1")
+    assert r.status_code == status
+    assert 'role="alert"' in r.text and "Nothing was deleted" in r.text
+    with _session(client) as s:
+        assert s.get(Show, show_id) is not None
+        assert s.scalars(select(Grab)).all()
+    assert not delete_route.called
+    return r
+
+
+@respx.mock
+def test_delete_refuses_symlinked_folder(del_client, tmp_path):
+    client = del_client
+    show_id = _add_show(client)
+    _grab(client, _add_ep(client, show_id, 1, state="downloading"))
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "Season 2").mkdir(parents=True)
+    (elsewhere / "Season 2" / "keep.mkv").write_text("x")
+    (_tv(client) / FOLDER).symlink_to(elsewhere, target_is_directory=True)
+    delete, _ = _mock_qbit([_torrent(H1, "kshow-1")])
+    page = client.get(f"/shows/{show_id}/delete")
+    assert "disabled" in _checkbox(page.text)
+    r = _assert_refused(client, show_id, delete)
+    assert "symlink" in r.text.lower()
+    assert (elsewhere / "Season 2" / "keep.mkv").exists()
+    assert (_tv(client) / FOLDER).is_symlink()
+
+
+@pytest.mark.parametrize("name", ["..", ".", "", "../outside", "a/b", "a\\b", "/abs"])
+@respx.mock
+def test_delete_refuses_folder_outside_tv_dir(del_client, tmp_path, name):
+    client = del_client
+    show_id = _add_show(client, folder_name=name)
+    _grab(client, _add_ep(client, show_id, 1, state="downloading"))
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "keep.mkv").write_text("x")
+    (_tv(client) / "a").mkdir()
+    (_tv(client) / "a" / "b").mkdir()
+    (_tv(client) / "keep.mkv").write_text("x")
+    delete, _ = _mock_qbit([_torrent(H1, "kshow-1")])
+    assert "disabled" in _checkbox(client.get(f"/shows/{show_id}/delete").text)
+    _assert_refused(client, show_id, delete)
+    assert (tmp_path / "outside" / "keep.mkv").exists()
+    assert (_tv(client) / "keep.mkv").exists()
+    assert (_tv(client) / "a" / "b").is_dir()
+
+
+@respx.mock
+def test_delete_refuses_folder_shared_with_another_show(del_client):
+    client = del_client
+    show_id = _add_show(client)
+    _add_show(client, tvdb_id=456)  # same folder_name
+    _grab(client, _add_ep(client, show_id, 1, state="downloading"))
+    folder = _library_folder(client)
+    delete, _ = _mock_qbit([_torrent(H1, "kshow-1")])
+    page = client.get(f"/shows/{show_id}/delete")
+    assert "disabled" in _checkbox(page.text)
+    assert "another show" in page.text.lower()
+    r = _assert_refused(client, show_id, delete)
+    assert "another show" in r.text.lower()
+    assert (folder / "poster.jpg").exists()
+    with _session(client) as s:
+        assert len(s.scalars(select(Show)).all()) == 2
+
+
+@respx.mock
+def test_delete_refuses_missing_folder_when_asked_to_delete_it(del_client):
+    client = del_client
+    show_id = _add_show(client)
+    _grab(client, _add_ep(client, show_id, 1, state="downloading"))
+    delete, _ = _mock_qbit([_torrent(H1, "kshow-1")])
+    _assert_refused(client, show_id, delete)
+
+
+@respx.mock
+def test_delete_with_qbittorrent_down_deletes_nothing(del_client):
+    client = del_client
+    show_id = _add_show(client)
+    _grab(client, _add_ep(client, show_id, 1, state="downloading"))
+    folder = _library_folder(client)
+    respx.post(f"{QBIT}/api/v2/auth/login").mock(side_effect=httpx.ConnectError("down"))
+    delete = respx.post(f"{QBIT}/api/v2/torrents/delete").respond(200)
+    apprise = respx.post(APPRISE).respond(200)
+    r = _delete(client, show_id, "1")
+    assert r.status_code == 503
+    assert 'role="alert"' in r.text and "qBittorrent" in r.text
+    assert not delete.called and not apprise.called
+    assert (folder / "poster.jpg").exists()
+    with _session(client) as s:
+        assert s.get(Show, show_id) is not None and s.scalars(select(Grab)).all()
+
+
+@respx.mock
+def test_delete_without_active_downloads_does_not_need_qbittorrent(del_client):
+    client = del_client
+    show_id = _add_show(client)
+    _grab(client, _add_ep(client, show_id, 1, state="downloaded"), state="done")
+    info = respx.get(f"{QBIT}/api/v2/torrents/info").respond(500)
+    respx.post(APPRISE).respond(200)
+    assert _delete(client, show_id).status_code == 303
+    assert not info.called
+    assert _shows(client) == set()
+
+
+@respx.mock
+def test_delete_folder_failing_part_way_still_forgets_show(del_client, monkeypatch, caplog):
+    client = del_client
+    show_id = _add_show(client)
+    folder = _library_folder(client)
+
+    def broken_rmtree(path, *, onexc):
+        onexc(os.unlink, str(path / "poster.jpg"), PermissionError("denied"))
+
+    monkeypatch.setattr("kshow.delete.shutil.rmtree", broken_rmtree)
+    _, apprise = _mock_qbit([])
+    r = _delete(client, show_id, "1")
+    assert r.status_code == 303
+    assert "folder_error=1" in r.headers["location"]
+    assert _shows(client) == set()
+    assert folder.exists()
+    assert "poster.jpg" in caplog.text
+    assert _apprise_json(apprise)["body"] == f"{FOLDER} was removed from kshow"
+    page = client.get(r.headers["location"])
+    assert page.status_code == 200
+    assert 'role="alert"' in page.text and "could not be deleted completely" in page.text
+
+
+@respx.mock
+def test_list_shows_deleted_banner(del_client):
+    client = del_client
+    show_id = _add_show(client)
+    _mock_qbit([])
+    r = _delete(client, show_id)
+    page = client.get(r.headers["location"])
+    assert f"{FOLDER} was deleted" in page.text
+    assert "could not be deleted completely" not in page.text
+
+
+def test_cross_origin_delete_rejected(client):
+    show_id = _add_show(client)
+    folder = _library_folder(client)
+    for headers in ({"Origin": "https://evil.example"}, {"Referer": "https://evil.example/x"}):
+        r = _delete(client, show_id, "1", headers=headers)
+        assert r.status_code == 403
+    assert _shows(client) == {FOLDER}
+    assert (folder / "poster.jpg").exists()
+
+
+def test_delete_missing_or_oversized_show_is_404(client):
+    _add_show(client)
+    for show_id in (HUGE, 2**63, 0, 999):
+        assert client.get(f"/shows/{show_id}/delete").status_code == 404, show_id
+        assert _delete(client, show_id, "1").status_code == 404, show_id
+    assert _shows(client) == {FOLDER}
+
+
+@pytest.mark.parametrize("lock", ["check_lock", "downloads_lock"])
+async def test_delete_waits_for_running_check_and_downloads(settings, lock):
+    import asyncio
+
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        with app.state.deps.session_factory() as s:
+            show = Show(search_title="x", folder_name=FOLDER)
+            s.add(show)
+            s.commit()
+            show_id = show.id
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+            held = getattr(app.state, lock)
+            await held.acquire()
+            task = asyncio.create_task(c.post(f"/shows/{show_id}/delete"))
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            with app.state.deps.session_factory() as s:
+                assert s.get(Show, show_id) is not None
+            held.release()
+            r = await task
+        assert r.status_code == 303
+        with app.state.deps.session_factory() as s:
+            assert s.get(Show, show_id) is None
+        assert not app.state.check_lock.locked() and not app.state.downloads_lock.locked()

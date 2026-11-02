@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Delete {{ show.folder_name }}{% endblock %}
+{% block content %}
+<p class="eyebrow danger-text">Delete show</p>
+<h1>{{ show.folder_name }}</h1>
+{% if error %}<p class="card alert" role="alert">{{ error }}</p>{% endif %}
+<form class="card form delete-form" method="post" action="/shows/{{ show.id }}/delete">
+  <ul class="delete-effects">
+    <li>kshow forgets this show, its seasons and download history.</li>
+    <li>Downloads still running for this show are stopped and their partial files removed.</li>
+  </ul>
+  <label class="check delete-check{% if folder.problem %} is-disabled{% endif %}">
+    <input type="checkbox" name="delete_folder" value="1"{% if folder.problem %} disabled{% endif %}>
+    <span>Also delete the folder from the TV library</span>
+  </label>
+  <div class="delete-folder">
+    <code>{{ folder.path }}</code>
+    {% if folder.problem %}
+    <span class="muted">{{ folder.problem }}</span>
+    {% else %}
+    <span class="muted">{{ folder.files }} file{{ "s" if folder.files != 1 }}, deleted for good when ticked.</span>
+    {% endif %}
+  </div>
+  <button class="danger big" type="submit">Delete</button>
+  <a class="button ghost big" href="/shows/{{ show.id }}">Cancel</a>
+</form>
+{% endblock %}

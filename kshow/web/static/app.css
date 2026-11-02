@@ -256,6 +256,24 @@ body.auth main { width: 100%; max-width: 380px; padding-top: 24px; padding-botto
 .actions button { width: 100%; }
 .small-print { margin-top: 20px; font-size: 0.8rem; }
 
+/* --- deleting a show ---------------------------------------------------------- */
+.delete-link { margin: 28px 0 0; padding-top: 14px; border-top: 1px solid var(--border); }
+.danger-link {
+  display: inline-flex; align-items: center; min-height: 44px;
+  color: var(--late); font-size: 0.9rem; text-decoration: none; opacity: 0.85;
+}
+.danger-link:hover { opacity: 1; text-decoration: underline; }
+.danger-text { color: var(--late); }
+.danger { background: #d64545; color: #fff; border-color: #d64545; font-weight: 700; }
+.danger:hover { border-color: #e05656; filter: brightness(1.08); }
+.delete-form { max-width: 560px; gap: 10px; }
+.delete-effects { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.delete-check { margin-top: 6px; }
+.delete-check.is-disabled { color: var(--muted); }
+.delete-check input { accent-color: #d64545; }
+.delete-folder { display: flex; flex-direction: column; gap: 2px; padding-left: 32px; }
+.delete-form .button, .delete-form button { width: 100%; margin-top: 4px; }
+
 .episodes { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--border); }
 .episode { padding: 12px 2px; border-bottom: 1px solid var(--border); }
 .episode-head { display: flex; align-items: center; gap: 12px; }

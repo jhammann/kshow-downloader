@@ -11,6 +11,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from urllib.parse import urlencode
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -19,9 +21,11 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from kshow import clock, manual
+from kshow import delete as show_delete
 from kshow.auth import require_same_origin, require_user
 from kshow.db import Episode, Grab, Season, Show, SourceRow, get_setting, set_setting
 from kshow.library import season_folder_name, suggest_folder
+from kshow.qbit import QbitError
 from kshow.releases import parse_user_input
 from kshow.scheduler import reschedule_check, trigger_check, trigger_search
 from kshow.tvdb import TvdbError, TvdbMatch, safe_image_url
@@ -346,8 +350,15 @@ _NO_STORE = {"Cache-Control": "no-store"}
 
 
 @router.get("/", response_class=HTMLResponse)
-async def show_list(request: Request):
-    response = _render(request, "shows.html", **_show_cards(request))
+async def show_list(request: Request, deleted: str = "", folder_error: str = ""):
+    """The show list; ?deleted=<name> (and folder_error=1) is the flash after a delete."""
+    response = _render(
+        request,
+        "shows.html",
+        deleted=deleted[:MAX_FOLDER_LEN],
+        folder_error=folder_error == "1",
+        **_show_cards(request),
+    )
     response.headers.update(_NO_STORE)
     return response
 
@@ -884,6 +895,67 @@ async def season_release(request: Request, show_id: int, number: int):
             status_code=400,
         )
     return _redirect(_season_url(show_id, number))
+
+
+# --- deleting a show -------------------------------------------------------------
+
+
+async def _delete_page(
+    request: Request, show_id: int, error: str | None = None, status_code: int = 200
+) -> HTMLResponse:
+    deps = request.app.state.deps
+    with _session(request) as session:
+        show = _get_show(session, show_id)
+    try:
+        folder = await show_delete.folder_info(deps, show_id)
+    except show_delete.ShowGone:
+        raise HTTPException(status_code=404, detail="Show not found") from None
+    return _render(
+        request,
+        "delete.html",
+        status_code=status_code,
+        show=show,
+        folder=folder,
+        error=error,
+    )
+
+
+@router.get("/shows/{show_id}/delete", response_class=HTMLResponse)
+async def show_delete_confirm(request: Request, show_id: int):
+    return await _delete_page(request, show_id)
+
+
+@router.post("/shows/{show_id}/delete")
+async def show_delete_post(request: Request, show_id: int):
+    """Delete the show; its library folder only when delete_folder is exactly "1"."""
+    delete_folder = str((await request.form()).get("delete_folder", "")) == "1"
+    with _session(request) as session:
+        _get_show(session, show_id)
+    state = request.app.state
+    try:
+        result = await show_delete.delete_show(
+            state.deps, state.check_lock, state.downloads_lock, show_id, delete_folder
+        )
+    except show_delete.ShowGone:
+        raise HTTPException(status_code=404, detail="Show not found") from None
+    except show_delete.DeleteRefused as e:
+        log.warning("not deleting show %d: %s", show_id, e)
+        return await _delete_page(
+            request, show_id, f"Nothing was deleted. {e}", status_code=400
+        )
+    except QbitError as e:
+        log.warning("not deleting show %d: qBittorrent failed: %s", show_id, e)
+        return await _delete_page(
+            request,
+            show_id,
+            "Nothing was deleted: qBittorrent could not be reached to stop this show's "
+            "downloads. Try again later.",
+            status_code=503,
+        )
+    query = {"deleted": result.name}
+    if result.folder_error:
+        query["folder_error"] = "1"
+    return _redirect(f"/?{urlencode(query)}")
 
 
 # --- settings ---------------------------------------------------------------------

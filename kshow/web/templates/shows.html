@@ -2,5 +2,11 @@
 {% block title %}Shows{% endblock %}
 {% block content %}
 <div class="visually-hidden"><h1>Shows</h1></div>
+{% if deleted %}
+<p class="card note" role="status">{{ deleted }} was deleted.</p>
+{% if folder_error %}
+<p class="card alert" role="alert">Its folder in the TV library could not be deleted completely. Check what is left of it.</p>
+{% endif %}
+{% endif %}
 {% include "_show_list.html" %}
 {% endblock %}

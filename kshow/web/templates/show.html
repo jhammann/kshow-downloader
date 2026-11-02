@@ -92,4 +92,5 @@
 <div class="card empty-card"><p class="muted">No seasons yet. The first check runs in the background.</p></div>
 {% endif %}
 <p class="muted small-print">Added {{ show.added_at | localtime }}</p>
+<p class="delete-link"><a class="danger-link" href="/shows/{{ show.id }}/delete">Delete show</a></p>
 {% endblock %}
