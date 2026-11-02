@@ -77,6 +77,62 @@ The example joins the existing `npm_default` network (the one nginx proxy manage
 - qBittorrent runs inside gluetun's network, which kshow can't join, so it is reached through
   the port gluetun publishes on the host: `http://<host>:8089`.
 
+## Seasons and what kshow fetches by itself
+
+Each show has its seasons listed on its page. What kshow downloads without you asking:
+
+- After you add a show, only episodes airing from that day on are fetched (the day is the
+  Korean date, since air dates are Korean broadcast dates). Older episodes are never fetched
+  by themselves; use Search for those.
+- Seasons from the one you picked onwards are followed. Earlier seasons are listed but not
+  followed.
+- A season that TVDB announces later is followed automatically, including episodes that
+  aired up to 14 days before kshow noticed it (TVDB often adds a season a little late). You
+  get a "New season" notification.
+- A finished show comes back to following by itself when TVDB announces a new season.
+- Episodes you deleted are never fetched again by themselves.
+
+Each season has a **Following new episodes** switch. Turn it off to stop automatic downloads
+for that season; Search still works. A stopped or finished show has a **Follow again** button.
+
+## Searching by hand
+
+Search works on every show and season, whether it is followed, stopped or finished.
+
+- **Search** (next to an episode) looks for that one episode. **Search season** looks for the
+  whole season.
+- Both are one-shot: kshow reads up to 5 result pages, picks the best release automatically
+  and sends it to qBittorrent. Searching never turns on automatic fetching for the episode.
+- Search season skips episodes you already had (shown as Missing, for example because you
+  deleted them) and episodes that haven't aired yet. A deleted episode is only fetched with its
+  own Search button, so one tap can't bring back everything you watched and deleted.
+- If a download you asked for fails later, kshow notifies you and does not try again. The
+  episode goes back to Not downloaded.
+
+### Release names use season
+
+This setting, per season, is the number after the title in torrent names; no number means 1.
+Both `Title 2` and `Title 시즌2` forms are recognised. Change it when a season's releases
+use a different number than TVDB does.
+
+### Episode labels
+
+| Label | Meaning |
+| --- | --- |
+| In Plex | The episode is in your library. |
+| Missing | kshow filed it before, but the file is gone from the library. |
+| Downloading NN% | The torrent is downloading. |
+| Wanted | kshow will fetch it by itself (followed season, not downloaded yet). |
+| Not downloaded | Nothing is fetched by itself; use Search if you want it. |
+| Not aired yet | The episode airs later. |
+| Failed | The download failed. Use Search to try again. |
+
+## Upgrading
+
+The first start of this version converts the database automatically. It first writes a backup
+next to it, `kshow.db.bak-<timestamp>` in `/config`. Delete the backup once everything looks
+right.
+
 ## Notifications (Apprise)
 
 kshow posts each notification to `APPRISE_URL`. With apprise-api's stateful endpoint
@@ -106,6 +162,9 @@ kshow notifies when:
 - a download fails, stalls or can't be moved into the library;
 - a download link doesn't return a torrent (kshow then tries another release);
 - an episode is overdue;
+- a search finds no release ("No release found");
+- a search can't run because no source is reachable ("Search failed");
+- TVDB announces a new season and kshow starts following it ("New season");
 - qBittorrent can't be reached or logged in to (once per outage), and when it works again;
 - a source becomes unreachable, and when it is reachable again.
 
