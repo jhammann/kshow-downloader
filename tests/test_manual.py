@@ -182,18 +182,47 @@ async def test_episode_search_on_missing_unmonitors_and_grabs(db, http, tmp_path
                      filed_path=str(folder / f"{FOLDER} - S01E02.mp4"))
     add_grab(db, e2, "done", "old")
     add_grab(db, e2, "failed", "bad")
-    mock_pages({1: [("p2", s1(2))]})
-    mock_posts("p2")
+    add_grab(db, e2, "add_failed", "outage")
+    # The post that failed before comes first but stays blacklisted.
+    mock_pages({1: [("bad", s1(2)), ("p2", s1(2, res="1080p"))]})
+    mock_posts("bad", "p2")
     add = mock_qbit()
     respx.post(APPRISE).respond(200)
 
     await search_episodes(make_deps(db, http, tmp_path), show_id, 1, [2])
 
-    assert grabbed(add) == [s1(2)]
+    assert grabbed(add) == [s1(2, res="1080p")]
     ep = episodes(db, show_id, season=1)[2]
     assert ep.monitored is False
     assert ep.state == "downloading"
-    assert grabs_of(db, e2) == [("downloading", f"{SITE}/t/p2.html")]
+    # Only the add that never reached qBittorrent is forgotten.
+    assert grabs_of(db, e2) == [
+        ("done", f"{SITE}/t/old.html"),
+        ("failed", f"{SITE}/t/bad.html"),
+        ("downloading", f"{SITE}/t/p2.html"),
+    ]
+
+
+@respx.mock
+async def test_missing_episode_not_found_stays_searchable_but_not_by_season(
+    db, http, tmp_path, today, season1
+):
+    show_id, folder = season1
+    e2 = add_episode(db, show_id, 2, season=1, monitored=True, state="downloaded",
+                     tvdb_airdate=date(2025, 10, 12),
+                     filed_path=str(folder / f"{FOLDER} - S01E02.mp4"))
+    add_grab(db, e2, "done", "old")
+    mock_pages({})
+    mock_qbit()
+    respx.post(APPRISE).respond(200)
+
+    await search_episodes(make_deps(db, http, tmp_path), show_id, 1, [2])
+
+    assert grabs_of(db, e2) == [("done", f"{SITE}/t/old.html")]
+    with db() as s:
+        season = s.get(Season, season_id(db, show_id, 1))
+        assert [e.number for e in episodes_to_search(s, season, [2], set())] == [2]
+        assert episodes_to_search(s, season, None, set()) == []
 
 
 def test_missing_needs_a_readable_folder_and_no_active_grab(db, season1):

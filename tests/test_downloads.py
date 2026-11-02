@@ -461,6 +461,23 @@ async def test_add_failed_duplicate_torrent_is_deleted(db, http, dirs, other):
 
 
 @respx.mock
+async def test_add_failed_after_missing_reset_is_adopted_despite_old_done_grab(db, http, dirs):
+    """A Missing episode searched by hand keeps its old finished grab; a new grab whose add
+    was reported as failed is still adopted."""
+    downloads, _ = dirs
+    old = add_grab(db, state="done", ep_state="wanted")
+    new = add_grab(db, state="add_failed", ep_state="wanted")
+    delete, _ = mock_qbit([torrent(new, 0.0, downloads / "kshow")])
+
+    await process_downloads(make_deps(db, http, dirs))
+
+    assert delete.call_count == 0
+    grab, ep = state(db, new)
+    assert grab.state == "downloading" and ep.state == "downloading"
+    assert state(db, old)[0].state == "done"
+
+
+@respx.mock
 async def test_add_failed_for_downloaded_episode_deletes_torrent(db, http, dirs):
     downloads, _ = dirs
     tag = add_grab(db, state="add_failed", ep_state="downloaded")

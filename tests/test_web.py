@@ -1040,10 +1040,12 @@ def test_no_season_search_without_targets(client, settings, today):
     _add_ep(client, show_id, 2, state="downloaded")  # Missing: only its own Search
     _add_ep(client, show_id, 3, aired=today + timedelta(days=7))  # not aired yet
     _add_ep(client, show_id, 4, state="downloading", grabs=[("downloading", 0.1)])
+    # A Missing episode searched by hand earlier: wanted again, its finished grab kept.
     _add_ep(client, show_id, 5, aired=today - timedelta(days=9), grabs=[("done", 1)])
     page = client.get(f"/shows/{show_id}").text
     assert _season_search(show_id) not in page and "Search season" not in page
     assert _ep_search(show_id, 2) in page
+    assert _ep_search(show_id, 5) in page
 
 
 def test_season_search_triggers_search(client, searched, today):

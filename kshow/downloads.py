@@ -5,7 +5,7 @@ import logging
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from kshow.db import Episode, Grab, get_setting, utcnow
@@ -198,11 +198,13 @@ async def _adopt(session: Session, deps: Deps, grab: Grab, torrents: list[QbitTo
     if not matches:
         return
     ep = session.get(Episode, grab.episode_id)
+    # A finished grab older than this one is a download whose file went Missing, which the
+    # user searched for again; only a newer one means the episode was handled meanwhile.
     taken = session.scalar(
         select(Grab.id).where(
             Grab.episode_id == ep.id,
             Grab.id != grab.id,
-            Grab.state.in_(("downloading", "done")),
+            or_(Grab.state == "downloading", and_(Grab.state == "done", Grab.id > grab.id)),
         )
     )
     if ep.state == "wanted" and taken is None:

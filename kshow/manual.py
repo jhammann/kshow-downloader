@@ -73,8 +73,8 @@ def episodes_to_search(
     `numbers=[n]` (the episode's own Search): that episode unless it is downloading or
     downloaded with its file present. A downloaded episode whose file is gone (Missing)
     qualifies only when the season folder could be read (`on_disk` is not None) and no
-    download for it is active; it becomes an unmonitored wanted episode and its old grabs are
-    deleted.
+    download for it is active; it becomes an unmonitored wanted episode and its `add_failed`
+    grabs are deleted (failed posts stay blacklisted, the finished grab stays).
 
     `numbers=None` (Search season): episodes not downloaded or downloading, never filed, with
     no finished grab, that have aired (or have no air date). Missing episodes never count.
@@ -111,10 +111,10 @@ def episodes_to_search(
             ep.state = "wanted"
             ep.monitored = False
             ep.overdue_notified = True  # asked for by the user, so never "overdue"
+            # Forget adds that never reached qBittorrent. Failed posts stay blacklisted; the
+            # finished grab stays too, which keeps the episode out of Search season.
             session.execute(
-                delete(Grab).where(
-                    Grab.episode_id == ep.id, Grab.state.in_(("done", "failed", "add_failed"))
-                )
+                delete(Grab).where(Grab.episode_id == ep.id, Grab.state == "add_failed")
             )
         targets.append(ep)
     session.commit()
