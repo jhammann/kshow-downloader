@@ -148,3 +148,8 @@ def test_cross_device_move_ignores_planted_temp_symlink(tmp_path, monkeypatch):
     assert planted.is_symlink() and planted.resolve() == victim.resolve()
     assert dest.read_bytes() == b"video" and not dest.is_symlink()
     assert sorted(p.name for p in season.iterdir()) == sorted([dest.name, planted.name])
+
+
+def test_sijeun_season_form_counts(tmp_path):
+    (tmp_path / "신인감독 김연경 시즌2.E04.261101.720p-NEXT.mp4").touch()
+    assert existing_episodes(tmp_path, 2) == {4}

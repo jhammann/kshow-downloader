@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import date
 
 _RELEASE_RE = re.compile(
-    r"^(?P<title>.+?)(?:\s+(?P<season>\d{1,2}))?"
+    r"^(?P<title>.+?)(?:\s*시즌\s*(?P<season>\d{1,2})|\s+(?P<season2>\d{1,2}))?"
     r"\.E(?P<ep>\d{1,4})(?:\.END)?\.(?P<date>\d{6})\.(?P<res>\d{3,4}p)"
     r"(?:[-.](?P<group>[^.]+))?$"
 )
@@ -38,7 +38,7 @@ def parse_release_name(name: str) -> Release | None:
         return None
     return Release(
         title=m["title"].strip(),
-        season=int(m["season"]) if m["season"] else 1,
+        season=int(m["season"] or m["season2"] or 1),
         episode=int(m["ep"]),
         airdate=_parse_date(m["date"]),
         resolution=m["res"],

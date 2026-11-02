@@ -35,3 +35,15 @@ def test_user_input_season_variants():
 
 def test_normalize_title():
     assert normalize_title("신인감독  김연경!") == normalize_title("신인감독김연경")
+
+
+def test_sijeun_season_form():
+    r = parse_release_name("우리들의 발라드 시즌2.E04.261026.720p-NEXT")
+    assert (r.title, r.season, r.episode) == ("우리들의 발라드", 2, 4)
+    r = parse_release_name("신인감독 김연경 시즌2.E04.261101.720p-NEXT.mp4")
+    assert (r.title, r.season, r.episode, r.group) == ("신인감독 김연경", 2, 4, "NEXT")
+    assert parse_release_name("심야괴담회 시즌 6.E18.261026.720p-NEXT").season == 6
+
+
+def test_number_inside_title_is_not_a_season():
+    assert parse_release_name("신인감독 김연경.E09.251123.1080p-F1RST").season == 1
