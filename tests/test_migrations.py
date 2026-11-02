@@ -277,6 +277,27 @@ def test_fresh_db_is_v2(tmp_path):
         assert s.scalars(select(Show)).all() == []
 
 
+def test_fresh_db_creation_is_atomic(tmp_path, monkeypatch):
+    """A crash while creating a fresh database leaves no v2 tables at user_version 0."""
+    path = tmp_path / "kshow.db"
+    real_create = migrations._create_tables
+
+    def create_then_fail(con, dialect, tables):
+        real_create(con, dialect, tables)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(migrations, "_create_tables", create_then_fail)
+    with pytest.raises(RuntimeError, match="boom"):
+        init_db(f"sqlite:///{path}")
+    assert sql(path, "SELECT name FROM sqlite_master") == []
+    assert sql(path, "PRAGMA user_version") == [(0,)]
+
+    monkeypatch.undo()
+    init_db(f"sqlite:///{path}")
+    assert sql(path, "PRAGMA user_version") == [(2,)]
+    assert backups(path) == []
+
+
 def test_fresh_in_memory_db_is_v2():
     Session = init_db("sqlite://")
     with Session() as s:

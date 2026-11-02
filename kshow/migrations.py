@@ -8,7 +8,8 @@ import logging
 import sqlite3
 from pathlib import Path
 
-from sqlalchemy.engine import Engine
+from sqlalchemy import Table
+from sqlalchemy.engine import Dialect, Engine
 from sqlalchemy.schema import CreateIndex, CreateTable
 
 from kshow.db import Base, utcnow
@@ -37,9 +38,7 @@ def migrate(engine: Engine, db_path: Path | None) -> None:
         raw.close()
 
     if not has_shows:
-        Base.metadata.create_all(engine)
-        with engine.begin() as conn:
-            conn.exec_driver_sql(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        _create_fresh(engine)
         return
     if version >= SCHEMA_VERSION:
         return
@@ -49,6 +48,46 @@ def migrate(engine: Engine, db_path: Path | None) -> None:
         log.info("Backed up the database to %s before migrating it to schema v2", backup)
     _migrate_v1_to_v2(engine)
     log.info("Migrated the database to schema v2 (seasons)")
+
+
+def _create_tables(con: sqlite3.Connection, dialect: Dialect, tables: list[Table]) -> None:
+    for table in tables:
+        con.execute(str(CreateTable(table).compile(dialect=dialect)))
+        for index in table.indexes:  # none today; keep create_all's behaviour
+            con.execute(str(CreateIndex(index).compile(dialect=dialect)))
+
+
+def _create_fresh(engine: Engine) -> None:
+    """Create every table and set user_version in one transaction, so a crash never leaves
+    v2 tables at user_version 0 (which the next start would take for a v1 database)."""
+    raw = engine.raw_connection()
+    try:
+        con: sqlite3.Connection = raw.driver_connection
+        raw.rollback()
+        isolation = con.isolation_level
+        # Explicit BEGIN/COMMIT: the driver would run CREATE TABLE outside a transaction.
+        con.isolation_level = None
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                existing = {
+                    r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                }
+                _create_tables(
+                    con,
+                    engine.dialect,
+                    [t for t in Base.metadata.sorted_tables if t.name not in existing],
+                )
+                con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                con.execute("COMMIT")
+            except BaseException:
+                if con.in_transaction:
+                    con.execute("ROLLBACK")
+                raise
+        finally:
+            con.isolation_level = isolation
+    finally:
+        raw.close()
 
 
 def _backup(db_path: Path) -> Path:
@@ -90,11 +129,11 @@ def _migrate_v1_to_v2(engine: Engine) -> None:
                 orphan_grabs = _orphan_grabs(con)
                 con.execute("ALTER TABLE shows RENAME TO shows_v1")
                 con.execute("ALTER TABLE episodes RENAME TO episodes_v1")
-                for name in ("shows", "seasons", "episodes"):
-                    table = Base.metadata.tables[name]
-                    con.execute(str(CreateTable(table).compile(dialect=engine.dialect)))
-                    for index in table.indexes:  # none today; keep create_all's behaviour
-                        con.execute(str(CreateIndex(index).compile(dialect=engine.dialect)))
+                _create_tables(
+                    con,
+                    engine.dialect,
+                    [Base.metadata.tables[n] for n in ("shows", "seasons", "episodes")],
+                )
                 _copy_v1_rows(con)
                 _check_counts(con)
                 if _orphan_grabs(con) - orphan_grabs:
