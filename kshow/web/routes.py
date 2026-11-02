@@ -602,6 +602,8 @@ async def episode_retry(request: Request, show_id: int, number: int):
         if ep.state not in ("wanted", "failed") and not missing:
             return _redirect(f"/shows/{show_id}")
         ep.state = "wanted"
+        if missing:
+            ep.overdue_notified = True  # asked for by the user, so never "overdue"
         cleared = ("done", "failed", "add_failed") if missing else ("failed", "add_failed")
         session.execute(
             delete(Grab).where(Grab.episode_id == ep.id, Grab.state.in_(cleared))

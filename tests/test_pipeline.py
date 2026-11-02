@@ -8,7 +8,7 @@ import respx
 from sqlalchemy import select
 
 from kshow.config import Settings
-from kshow.db import Episode, Grab, Show, SourceRow, get_setting, init_db, utcnow
+from kshow.db import Episode, Grab, Show, SourceRow, get_setting, init_db, set_setting, utcnow
 from kshow.notify import Notifier
 from kshow.pipeline import Deps, check_all_shows, check_show, select_releases
 from kshow.qbit import QbitClient
@@ -649,3 +649,53 @@ async def test_source_back_notifies_once(db, http, tmp_path):
     await check_show(deps, show_id)
 
     assert sent(apprise) == [("Source back", "torrenttip is reachable again.")]
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "rejection", [httpx.Response(409, text="Fails."), httpx.Response(200, text="Fails.")]
+)
+async def test_qbit_rejection_is_not_an_outage(db, http, tmp_path, rejection):
+    mock_search("신인감독 김연경 2.E04.261101.720p-NEXT")
+    mock_post(1)
+    respx.post(f"{QBIT}/api/v2/auth/login").respond(
+        200, text="Ok.", headers={"Set-Cookie": "SID=abc; path=/"}
+    )
+    add = respx.post(f"{QBIT}/api/v2/torrents/add").mock(return_value=rejection)
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db)
+    deps = make_deps(db, http, tmp_path)
+
+    await check_show(deps, show_id)
+    await check_show(deps, show_id)  # the add_failed grab is reused: no second notification
+
+    assert add.call_count == 2
+    assert sent(apprise) == [(
+        "Download failed",
+        "The Wonder Coach S02E04: qBittorrent rejected the torrent "
+        "(신인감독 김연경 2.E04.261101.720p-NEXT).",
+    )]
+    assert episodes(db, show_id)[4].state == "wanted"
+    with db() as s:
+        assert s.scalars(select(Grab)).one().state == "add_failed"
+        assert get_setting(s, "qbit_outage_since") == ""
+
+
+@respx.mock
+async def test_qbit_rejection_ends_an_outage(db, http, tmp_path):
+    mock_search("신인감독 김연경 2.E04.261101.720p-NEXT")
+    mock_post(1)
+    respx.post(f"{QBIT}/api/v2/auth/login").respond(
+        200, text="Ok.", headers={"Set-Cookie": "SID=abc; path=/"}
+    )
+    respx.post(f"{QBIT}/api/v2/torrents/add").respond(200, text="Fails.")
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db)
+    with db() as s:
+        set_setting(s, "qbit_outage_since", utcnow().isoformat())
+
+    await check_show(make_deps(db, http, tmp_path), show_id)
+
+    assert [t for t, _ in sent(apprise)] == ["qBittorrent back", "Download failed"]
+    with db() as s:
+        assert get_setting(s, "qbit_outage_since") == ""

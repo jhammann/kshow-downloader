@@ -15,6 +15,10 @@ class QbitError(Exception):
     """Any qBittorrent failure: transport, auth, non-2xx or malformed response."""
 
 
+class QbitRejected(QbitError):
+    """qBittorrent answered but refused to add the torrent: it is up and running."""
+
+
 @dataclass
 class QbitTorrent:
     hash: str
@@ -70,14 +74,17 @@ class QbitClient:
             if cookie.name == "SID":
                 self._http.cookies.jar.clear(cookie.domain, cookie.path, cookie.name)
 
-    async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+    async def _request(
+        self, method: str, path: str, allow: tuple[int, ...] = (), **kwargs
+    ) -> httpx.Response:
+        """Send with login; raise on a non-2xx status unless it is in allow."""
         if self._sid is None:
             await self._login()
         resp = await self._send(method, path, **kwargs)
         if resp.status_code == 403:
             await self._login()
             resp = await self._send(method, path, **kwargs)
-        if not resp.is_success:
+        if not resp.is_success and resp.status_code not in allow:
             raise QbitError(f"qBittorrent {path} returned HTTP {resp.status_code}")
         return resp
 
@@ -109,20 +116,25 @@ class QbitClient:
             "/torrents/add",
             files={"torrents": (filename, data, "application/x-bittorrent")},
             data={"category": category, "savepath": save_path, "tags": tag},
+            allow=(409,),
         )
         # Web API < 2.14 answers "Ok." / "Fails."; qBittorrent 5.2+ (API 2.14) answers
-        # JSON counts, or HTTP 409 (raised by _request) when nothing was added.
+        # JSON counts, or HTTP 409 when nothing was added.
         text = resp.text.strip()
+        if resp.status_code == 409:
+            raise QbitRejected(f"qBittorrent rejected torrent (HTTP 409): {text[:200]!r}")
         if text == "Ok.":
             return
+        if text == "Fails.":
+            raise QbitRejected("qBittorrent rejected torrent: 'Fails.'")
         try:
             body = resp.json()
             success = int(body["success_count"]) + int(body["pending_count"])
             failures = int(body["failure_count"])
         except (ValueError, KeyError, TypeError):
-            raise QbitError(f"qBittorrent rejected torrent: {text[:200]!r}") from None
+            raise QbitError(f"qBittorrent add returned unexpected reply: {text[:200]!r}") from None
         if failures > 0 or success < 1:
-            raise QbitError(f"qBittorrent rejected torrent: {text[:200]!r}")
+            raise QbitRejected(f"qBittorrent rejected torrent: {text[:200]!r}")
 
     async def torrents(self, category: str) -> list[QbitTorrent]:
         self._check_category(category)

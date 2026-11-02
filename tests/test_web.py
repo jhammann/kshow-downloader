@@ -672,6 +672,7 @@ def test_search_and_retry(client, triggered):
     with _session(client) as s:
         assert [g.state for g in s.scalars(select(Grab))] == ["done"]
         assert s.scalar(select(Episode)).state == "wanted"
+        assert s.scalar(select(Episode)).overdue_notified is False
     assert triggered == [show_id, show_id]
 
     assert client.get("/shows/999").status_code == 404
@@ -907,6 +908,7 @@ def test_download_again_resets_missing_episode(client, settings, triggered):
     with _session(client) as s:
         eps = {e.number: e for e in s.scalars(select(Episode))}
         assert eps[4].state == "wanted"
+        assert eps[4].overdue_notified is True  # a user action, not an overdue episode
         assert s.scalars(select(Grab).where(Grab.episode_id == eps[4].id)).all() == []
         assert eps[3].state == "downloaded"
         assert len(s.scalars(select(Grab).where(Grab.episode_id == eps[3].id)).all()) == 3

@@ -13,7 +13,7 @@ from kshow.config import Settings
 from kshow.db import Episode, Grab, Show, SourceRow, get_setting, utcnow
 from kshow.library import existing_episodes
 from kshow.notify import Notifier
-from kshow.qbit import QbitClient, QbitError
+from kshow.qbit import QbitClient, QbitError, QbitRejected
 from kshow.qbit_outage import qbit_failed, qbit_ok
 from kshow.releases import normalize_title
 from kshow.sources.torrenttip import (
@@ -213,6 +213,19 @@ async def _grab(
                 save_path=save_path,
                 tag=grab.qbit_tag,
             )
+        except QbitRejected as e:
+            # qBittorrent is up; adoption picks the torrent up if it was added after all.
+            log.warning("qBittorrent rejected %s: %s", c.release.raw, e)
+            first_failure = grab.state != "add_failed"  # a reused grab was reported already
+            grab.state = "add_failed"
+            session.commit()
+            await qbit_ok(session, deps.notifier)
+            if first_failure:
+                await deps.notifier.send(
+                    "Download failed",
+                    f"{label}: qBittorrent rejected the torrent ({c.release.raw}).",
+                )
+            continue
         except QbitError as e:
             log.warning("qBittorrent add failed, stopping grabs for %s: %s", show.folder_name, e)
             grab.state = "add_failed"

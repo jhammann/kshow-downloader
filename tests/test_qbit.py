@@ -2,7 +2,7 @@ import httpx
 import pytest
 import respx
 
-from kshow.qbit import QbitClient, QbitError, QbitFile, QbitTorrent
+from kshow.qbit import QbitClient, QbitError, QbitFile, QbitRejected, QbitTorrent
 
 URL = "http://qbit:8080"
 API = f"{URL}/api/v2"
@@ -56,7 +56,7 @@ async def test_session_reused_between_calls(client):
 async def test_add_rejected_body_raises(client):
     respx.post(f"{API}/auth/login").mock(return_value=login_ok())
     respx.post(f"{API}/torrents/add").mock(return_value=httpx.Response(200, text="Fails."))
-    with pytest.raises(QbitError):
+    with pytest.raises(QbitRejected):
         await client.add_torrent(b"x", "a.torrent", "kshow", "/dl", "t")
 
 
@@ -249,26 +249,43 @@ async def test_add_accepts_v2_14_json_success(client, counts):
 
 @respx.mock
 @pytest.mark.parametrize(
-    "response",
+    "response,rejected",
     [
-        httpx.Response(409, text="Fails."),
-        httpx.Response(
-            200,
-            json={"success_count": 1, "failure_count": 1, "pending_count": 0,
-                  "added_torrent_ids": []},
+        (httpx.Response(409, text="Fails."), True),
+        (
+            httpx.Response(
+                200,
+                json={"success_count": 1, "failure_count": 1, "pending_count": 0,
+                      "added_torrent_ids": []},
+            ),
+            True,
         ),
-        httpx.Response(
-            200,
-            json={"success_count": 0, "failure_count": 0, "pending_count": 0,
-                  "added_torrent_ids": []},
+        (
+            httpx.Response(
+                200,
+                json={"success_count": 0, "failure_count": 0, "pending_count": 0,
+                      "added_torrent_ids": []},
+            ),
+            True,
         ),
-        httpx.Response(200, json={"unexpected": True}),
-        httpx.Response(200, json=[1, 2]),
-        httpx.Response(200, text="garbage"),
+        (httpx.Response(200, json={"unexpected": True}), False),
+        (httpx.Response(200, json=[1, 2]), False),
+        (httpx.Response(200, text="garbage"), False),
+        (httpx.Response(500, text="boom"), False),
     ],
 )
-async def test_add_rejections_raise(client, response):
+async def test_add_rejections_raise(client, response, rejected):
     respx.post(f"{API}/auth/login").mock(return_value=login_ok())
     respx.post(f"{API}/torrents/add").mock(return_value=response)
-    with pytest.raises(QbitError):
+    with pytest.raises(QbitError) as info:
         await client.add_torrent(b"x", "a.torrent", "kshow", "/dl", "t")
+    assert isinstance(info.value, QbitRejected) is rejected
+
+
+@respx.mock
+async def test_409_outside_add_is_a_plain_error(client):
+    respx.post(f"{API}/auth/login").mock(return_value=login_ok())
+    respx.get(f"{API}/torrents/info").mock(return_value=httpx.Response(409))
+    with pytest.raises(QbitError) as info:
+        await client.torrents("kshow")
+    assert not isinstance(info.value, QbitRejected)
