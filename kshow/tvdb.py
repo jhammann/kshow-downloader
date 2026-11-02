@@ -181,30 +181,6 @@ class TvdbClient:
         name = self._data(resp).get("name")
         return name if isinstance(name, str) and name else None
 
-    async def season_episodes(self, series_id: int, season: int) -> list[TvdbEpisode]:
-        resp = await self._get(
-            f"/series/{series_id}/episodes/default", {"season": season, "page": 0}
-        )
-        if resp.status_code == 404:
-            raise TvdbError(f"TVDB series {series_id} not found")
-        episodes = []
-        eps = self._data(resp).get("episodes") or []
-        if not isinstance(eps, list):
-            raise TvdbError("TVDB episodes is not a list")
-        for ep in eps:
-            if not isinstance(ep, dict):
-                continue
-            if ep.get("seasonNumber") != season or ep.get("number") is None:
-                continue
-            aired = None
-            if isinstance(ep.get("aired"), str):
-                try:
-                    aired = date.fromisoformat(ep["aired"])
-                except ValueError:
-                    log.warning("Bad aired date %r for series %s", ep["aired"], series_id)
-            episodes.append(TvdbEpisode(number=ep["number"], aired=aired))
-        return episodes
-
     async def all_episodes(self, series_id: int) -> list[TvdbEpisode]:
         """Every episode of every real season (specials, season 0, are skipped)."""
         episodes: list[TvdbEpisode] = []

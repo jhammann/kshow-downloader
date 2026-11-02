@@ -83,28 +83,6 @@ async def test_lookup_not_found(client):
 
 
 @respx.mock
-async def test_season_episodes(client):
-    respx.post(f"{BASE}/login").mock(return_value=login_ok())
-    route = respx.get(f"{BASE}/series/123/episodes/default").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "data": {
-                    "episodes": [
-                        {"number": 3, "seasonNumber": 2, "aired": "2026-10-25"},
-                        {"number": 4, "seasonNumber": 2, "aired": None},
-                        {"number": 1, "seasonNumber": 1, "aired": "2025-01-01"},
-                    ]
-                }
-            },
-        )
-    )
-    eps = await client.season_episodes(123, 2)
-    assert [(e.number, e.aired) for e in eps] == [(3, date(2026, 10, 25)), (4, None)]
-    assert route.calls.last.request.url.params["season"] == "2"
-
-
-@respx.mock
 async def test_english_name_and_404(client):
     respx.post(f"{BASE}/login").mock(return_value=login_ok())
     respx.get(f"{BASE}/series/1/translations/eng").mock(
@@ -170,7 +148,7 @@ async def test_malformed_dict_bodies_raise_tvdb_error(client, body):
     with pytest.raises(TvdbError):
         await client.english_name(1)
     with pytest.raises(TvdbError):
-        await client.season_episodes(1, 1)
+        await client.all_episodes(1)
     with pytest.raises(TvdbError):
         await client.lookup("1")
 
@@ -199,25 +177,17 @@ async def test_malformed_items_skipped(client):
     )
     res = await client.search("x")
     assert [(m.id, m.english_name) for m in res] == [(5, None)]
-    eps = await client.season_episodes(1, 1)
+    eps = await client.all_episodes(1)
     assert [(e.number, e.aired) for e in eps] == [(1, None)]
 
 
 @respx.mock
-async def test_season_episodes_404_raises(client):
-    respx.post(f"{BASE}/login").mock(return_value=login_ok())
-    respx.get(f"{BASE}/series/9/episodes/default").mock(return_value=httpx.Response(404))
-    with pytest.raises(TvdbError):
-        await client.season_episodes(9, 1)
-
-
-@respx.mock
-async def test_season_with_no_episodes_is_empty(client):
+async def test_series_with_no_episodes_is_empty(client):
     respx.post(f"{BASE}/login").mock(return_value=login_ok())
     respx.get(f"{BASE}/series/9/episodes/default").mock(
         return_value=httpx.Response(200, json={"data": {"episodes": []}})
     )
-    assert await client.season_episodes(9, 1) == []
+    assert await client.all_episodes(9) == []
 
 
 @respx.mock

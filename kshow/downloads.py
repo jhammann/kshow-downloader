@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from kshow.db import Episode, Grab, Show, get_setting, utcnow
+from kshow.db import Episode, Grab, get_setting, utcnow
 from kshow.library import VIDEO_EXTS, move_into_library, target_path
 from kshow.pipeline import Deps
 from kshow.qbit import QbitError, QbitFile, QbitTorrent
@@ -80,7 +80,6 @@ async def _finish(
     deps: Deps,
     grab: Grab,
     ep: Episode,
-    show: Show,
     torrent: QbitTorrent,
     label: str,
 ) -> None:
@@ -102,11 +101,12 @@ async def _finish(
         await _source_missing(session, deps, grab, ep, torrent, label, f"{src} is not a file")
         return
 
+    season = ep.season
     dest = target_path(
         deps.settings.tv_dir,
-        show.folder_name,
-        show.season_folder,
-        show.tvdb_season,
+        season.show.folder_name,
+        season.folder,
+        season.number,
         ep.number,
         PurePosixPath(video.name).suffix.lower(),
     )
@@ -143,8 +143,8 @@ async def _process(
     stall: timedelta,
 ) -> None:
     ep = session.get(Episode, grab.episode_id)
-    show = session.get(Show, ep.show_id)
-    label = f"{show.folder_name} S{show.tvdb_season:02}E{ep.number:02}"
+    season = ep.season
+    label = f"{season.show.folder_name} S{season.number:02}E{ep.number:02}"
 
     matches = [t for t in torrents if grab.qbit_tag in t.tags]
     if not matches:
@@ -167,7 +167,7 @@ async def _process(
     torrent = matches[0]
 
     if torrent.state in SEEDING_STATES:
-        await _finish(session, deps, grab, ep, show, torrent, label)
+        await _finish(session, deps, grab, ep, torrent, label)
         return
     if torrent.state in BROKEN_STATES:
         await _source_missing(

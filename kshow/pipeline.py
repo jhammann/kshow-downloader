@@ -1,4 +1,5 @@
-"""Per-show check: sync episodes, search sources, pick releases, hand torrents to qBittorrent."""
+"""Per-show check: sync seasons and episodes, search sources, pick releases, hand torrents to
+qBittorrent. Only monitored episodes of followed seasons are fetched automatically."""
 
 import logging
 from collections.abc import Callable
@@ -9,9 +10,10 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from kshow import clock
 from kshow.config import Settings
-from kshow.db import Episode, Grab, Show, SourceRow, get_setting, utcnow
-from kshow.library import existing_episodes
+from kshow.db import Episode, Grab, Season, Show, SourceRow, get_setting, utcnow
+from kshow.library import existing_episodes, season_folder_name
 from kshow.notify import Notifier
 from kshow.qbit import QbitClient, QbitError, QbitRejected
 from kshow.torrentfile import info_hash
@@ -30,6 +32,9 @@ log = logging.getLogger(__name__)
 
 AIRDATE_TOLERANCE = timedelta(days=7)
 OVERDUE_AFTER = timedelta(days=2)
+# A newly detected season also monitors episodes that aired this long before detection,
+# since TVDB often adds a Korean season a little late.
+NEW_SEASON_GRACE = timedelta(days=14)
 _DONE_STATES = ("downloaded", "downloading")
 
 
@@ -77,33 +82,87 @@ def select_releases(
     return {ep: c for ep, (_, c) in best.items()}
 
 
-def _episode(session: Session, show_id: int, number: int) -> Episode:
+def _episode(session: Session, season: Season, number: int) -> Episode:
     ep = session.scalar(
-        select(Episode).where(Episode.show_id == show_id, Episode.number == number)
+        select(Episode).where(Episode.season_id == season.id, Episode.number == number)
     )
     if ep is None:
-        ep = Episode(show_id=show_id, number=number)
+        ep = Episode(season_id=season.id, number=number)
         session.add(ep)
         session.flush()
     return ep
 
 
-async def _sync_tvdb(session: Session, deps: Deps, show: Show) -> set[int] | None:
-    """Upsert TVDB episodes; return their numbers, or None when TVDB is unavailable."""
+def _monitors(season: Season, aired: date | None) -> bool:
+    """Whether a newly seen episode of this season is fetched automatically."""
+    if not season.followed or season.followed_since is None:
+        return False
+    return aired is None or aired >= season.followed_since
+
+
+async def sync_seasons(session: Session, deps: Deps, show: Show) -> bool:
+    """Create seasons and episodes TVDB lists; return whether TVDB answered.
+
+    A season above show.max_known_season is new and followed from 14 days before today. Lower
+    seasons are created unfollowed. Only new episode rows get `monitored` set; existing rows
+    keep theirs and only get their air date refreshed.
+    """
     if show.tvdb_id is None or deps.tvdb is None:
-        return None
+        return False
     try:
-        tvdb_eps = await deps.tvdb.season_episodes(show.tvdb_id, show.tvdb_season)
+        tvdb_eps = await deps.tvdb.all_episodes(show.tvdb_id)
     except TvdbError as e:
         log.warning("TVDB episode sync failed for %s: %s", show.folder_name, e)
-        return None
+        return False
+    by_season: dict[int, list] = {}
     for t in tvdb_eps:
-        _episode(session, show.id, t.number).tvdb_airdate = t.aired
-    aired = [t.aired for t in tvdb_eps if t.aired is not None]
-    if aired:
-        show.season_first_aired = min(aired)
+        by_season.setdefault(t.season, []).append(t)
+    existing = {s.number: s for s in show.seasons}
+    announced: list[int] = []
+    for number in sorted(by_season):
+        season = existing.get(number)
+        if season is None:
+            new = number > show.max_known_season
+            season = Season(
+                show_id=show.id,
+                number=number,
+                release_season=number,
+                folder=season_folder_name(deps.settings.tv_dir / show.folder_name, number),
+                followed=new,
+                followed_since=clock.today_kst() - NEW_SEASON_GRACE if new else None,
+            )
+            session.add(season)
+            session.flush()
+            if new:
+                announced.append(number)
+        known = {
+            e.number: e
+            for e in session.scalars(select(Episode).where(Episode.season_id == season.id))
+        }
+        for t in by_season[number]:
+            ep = known.get(t.number)
+            if ep is None:
+                ep = Episode(
+                    season_id=season.id,
+                    number=t.number,
+                    monitored=_monitors(season, t.aired),
+                )
+                session.add(ep)
+                known[t.number] = ep
+            ep.tvdb_airdate = t.aired
+        aired = [t.aired for t in by_season[number] if t.aired is not None]
+        if aired:
+            season.first_aired = min(aired)
+    if by_season:
+        show.max_known_season = max(show.max_known_season, max(by_season))
     session.commit()
-    return {t.number for t in tvdb_eps}
+    session.refresh(show)
+    for number in announced:
+        log.info("%s season %d is new; following it", show.folder_name, number)
+        await deps.notifier.send(
+            "New season", f"{show.folder_name} season {number} is announced; kshow will follow it."
+        )
+    return True
 
 
 async def _backfill_poster(session: Session, deps: Deps, show: Show) -> None:
@@ -121,9 +180,14 @@ async def _backfill_poster(session: Session, deps: Deps, show: Show) -> None:
         session.commit()
 
 
-async def _search(
-    session: Session, deps: Deps, sources: list[TorrenttipSource], query: str
+async def search_candidates(
+    session: Session,
+    deps: Deps,
+    sources: list[TorrenttipSource],
+    query: str,
+    pages: int = 1,
 ) -> list[Candidate]:
+    """Search every source for query. Only the first results page exists for now."""
     candidates: list[Candidate] = []
     for source in sources:
         row = session.scalar(select(SourceRow).where(SourceRow.name == source.name))
@@ -156,22 +220,24 @@ async def _already_in_qbit(deps: Deps, data: bytes) -> bool:
         return False
 
 
-async def _grab(
+async def grab_selected(
     session: Session,
     deps: Deps,
     show: Show,
+    season: Season,
     sources: dict[str, TorrenttipSource],
     selected: dict[int, Candidate],
 ) -> None:
+    """Hand each selected release of this season to qBittorrent (stops on an outage)."""
     category = get_setting(session, "qbit_category")
     save_path = get_setting(session, "qbit_save_path")
     for number, c in sorted(selected.items()):
         source = sources.get(c.source)
         if source is None:
             continue
-        ep = _episode(session, show.id, number)
+        ep = _episode(session, season, number)
         session.commit()
-        label = f"{show.folder_name} S{show.tvdb_season:02}E{number:02}"
+        label = f"{show.folder_name} S{season.number:02}E{number:02}"
         try:
             data = await source.fetch_torrent(c.post_url)
             if not is_torrent(data):
@@ -271,11 +337,45 @@ async def _grab(
         grab.last_progress_at = utcnow()
         ep.state = "downloading"
         session.commit()
-        log.info("grabbed %s for %s E%02d", c.release.raw, show.folder_name, number)
+        log.info("grabbed %s for %s", c.release.raw, label)
         quality = "-".join(p for p in (c.release.resolution, c.release.group) if p)
         await deps.notifier.send(
             "Download started", f"{label} ({quality})" if quality else label
         )
+
+
+def _wanted(
+    session: Session, season: Season, candidates: list[Candidate], title: str
+) -> set[int]:
+    """Episodes of a followed season to fetch now.
+
+    Monitored episodes not yet downloaded or downloading, plus episodes TVDB doesn't list
+    whose release aired on or after the season was followed (created monitored).
+    """
+    eps = {
+        e.number: e
+        for e in session.scalars(select(Episode).where(Episode.season_id == season.id))
+    }
+    wanted = {n for n, e in eps.items() if e.monitored and e.state not in _DONE_STATES}
+    if season.followed_since is None:
+        return wanted
+    for c in candidates:
+        r = c.release
+        if (
+            r.episode in eps
+            or normalize_title(r.title) != title
+            or r.season != season.release_season
+            or r.airdate is None
+            or r.airdate < season.followed_since
+        ):
+            continue
+        log.info("%s S%02dE%02d is not on TVDB yet; following its release",
+                 season.show.folder_name, season.number, r.episode)
+        eps[r.episode] = Episode(season_id=season.id, number=r.episode, monitored=True)
+        session.add(eps[r.episode])
+        wanted.add(r.episode)
+    session.commit()
+    return wanted
 
 
 async def check_show(deps: Deps, show_id: int) -> None:
@@ -284,62 +384,67 @@ async def check_show(deps: Deps, show_id: int) -> None:
         if show is None:
             return
 
-        # 1. TVDB episode sync
-        tvdb_numbers = await _sync_tvdb(session, deps, show)
-        if tvdb_numbers is not None:  # TVDB answered, so a poster lookup is worth trying
+        # 1. TVDB seasons and episodes
+        synced = await sync_seasons(session, deps, show)
+        if synced:  # TVDB answered, so a poster lookup is worth trying
             await _backfill_poster(session, deps, show)
+        seasons = list(show.seasons)
 
         # 2. Episodes already in the library
-        season_dir = deps.settings.tv_dir / show.folder_name / show.season_folder
-        for number in existing_episodes(season_dir, show.tvdb_season):
-            _episode(session, show.id, number).state = "downloaded"
+        for season in seasons:
+            season_dir = deps.settings.tv_dir / show.folder_name / season.folder
+            for number in existing_episodes(season_dir, season.number):
+                _episode(session, season, number).state = "downloaded"
         session.commit()
 
-        # 3. Search
-        sources = build_sources(session, deps.http, deps.settings)
-        candidates = await _search(session, deps, sources, show.search_title)
+        followed = [s for s in seasons if s.followed]
+        if followed:
+            # 3. One search covers every season
+            sources = build_sources(session, deps.http, deps.settings)
+            candidates = await search_candidates(session, deps, sources, show.search_title)
+            title = normalize_title(show.search_title)
+            preferred = get_setting(session, "preferred_resolution")
 
-        # 4. Wanted episodes and previously failed posts
-        eps = {
-            e.number: e
-            for e in session.scalars(select(Episode).where(Episode.show_id == show.id))
-        }
-        wanted = {n for n, e in eps.items() if e.state not in _DONE_STATES}
-        wanted |= {c.release.episode for c in candidates if c.release.episode not in eps}
-        failed = {
-            (number, url)
-            for number, url in session.execute(
-                select(Episode.number, Grab.post_url)
-                .join(Grab, Grab.episode_id == Episode.id)
-                .where(Episode.show_id == show.id, Grab.state == "failed")
-            )
-        }
-        candidates = [
-            c for c in candidates if (c.release.episode, c.post_url) not in failed
-        ]
+            for season in followed:
+                # 4. Wanted episodes; posts that failed before are not tried again
+                wanted = _wanted(session, season, candidates, title)
+                failed = {
+                    (number, url)
+                    for number, url in session.execute(
+                        select(Episode.number, Grab.post_url)
+                        .join(Grab, Grab.episode_id == Episode.id)
+                        .where(Episode.season_id == season.id, Grab.state == "failed")
+                    )
+                }
+                usable = [c for c in candidates if (c.release.episode, c.post_url) not in failed]
 
-        # 5. Select and grab
-        selected = select_releases(
-            candidates,
-            show.search_title,
-            show.release_season,
-            wanted,
-            show.season_first_aired,
-            get_setting(session, "preferred_resolution"),
-        )
-        await _grab(session, deps, show, {s.name: s for s in sources}, selected)
+                # 5. Select and grab
+                selected = select_releases(
+                    usable,
+                    show.search_title,
+                    season.release_season,
+                    wanted,
+                    season.first_aired,
+                    preferred,
+                )
+                await grab_selected(
+                    session, deps, show, season, {s.name: s for s in sources}, selected
+                )
 
-        # 6. Overdue episodes
+        # 6. Overdue monitored episodes of followed seasons
         cutoff = utcnow().date() - OVERDUE_AFTER
         overdue = session.scalars(
             select(Episode)
+            .join(Season)
             .where(
-                Episode.show_id == show.id,
+                Season.show_id == show.id,
+                Season.followed.is_(True),
+                Episode.monitored.is_(True),
                 Episode.state == "wanted",
                 Episode.tvdb_airdate <= cutoff,
                 Episode.overdue_notified.is_(False),
             )
-            .order_by(Episode.number)
+            .order_by(Season.number, Episode.number)
         ).all()
         for ep in overdue:
             await deps.notifier.send(
@@ -348,13 +453,19 @@ async def check_show(deps: Deps, show_id: int) -> None:
             ep.overdue_notified = True
             session.commit()
 
-        # 7. Finished
-        if tvdb_numbers and deps.tvdb is not None:
-            states = {
-                e.number: e.state
-                for e in session.scalars(select(Episode).where(Episode.show_id == show.id))
-            }
-            if all(states.get(n) == "downloaded" for n in tvdb_numbers):
+        # 7. Finished: TVDB says ended and every monitored episode is downloaded
+        if synced and deps.tvdb is not None:
+            pending = session.scalar(
+                select(Episode.id)
+                .join(Season)
+                .where(
+                    Season.show_id == show.id,
+                    Episode.monitored.is_(True),
+                    Episode.state != "downloaded",
+                )
+                .limit(1)
+            )
+            if pending is None:
                 try:
                     ended = await deps.tvdb.is_ended(show.tvdb_id)
                 except TvdbError as e:
@@ -363,7 +474,7 @@ async def check_show(deps: Deps, show_id: int) -> None:
                 if ended:
                     show.status = "finished"
                     session.commit()
-                    log.info("%s season %d finished", show.folder_name, show.tvdb_season)
+                    log.info("%s finished", show.folder_name)
 
 
 async def check_all_shows(deps: Deps) -> None:

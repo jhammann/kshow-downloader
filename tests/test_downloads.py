@@ -12,15 +12,12 @@ import respx
 from sqlalchemy import select
 
 from kshow.config import Settings
-from kshow.db import Episode, Grab, Show, get_setting, init_db, set_setting, utcnow
+from kshow.db import Episode, Grab, Season, Show, get_setting, init_db, set_setting, utcnow
 from kshow import downloads as downloads_module
 from kshow.downloads import map_path, process_downloads
 from kshow.notify import Notifier
 from kshow.pipeline import Deps
 from kshow.qbit import QbitClient
-
-# Old one-season-per-show shape; reworked by Task 4 of the seasons plan.
-SEASONS_REWORK = pytest.mark.xfail(strict=False, reason="seasons rework, Task 4")
 
 QBIT = "http://qbit:8080"
 APPRISE = "http://apprise:8000/notify"
@@ -61,25 +58,38 @@ def make_deps(db, http, dirs) -> Deps:
 
 
 def add_grab(
-    db, state="downloading", progress=0.0, last_progress_at=None, number=4, ep_state=None
+    db,
+    state="downloading",
+    progress=0.0,
+    last_progress_at=None,
+    number=4,
+    ep_state=None,
+    season=2,
+    folder=None,
 ) -> str:
-    """Create show + episode + grab; return the grab's qBittorrent tag."""
+    """Create show + season + episode + grab; return the grab's qBittorrent tag."""
     with db() as s:
         show = s.scalar(select(Show))
         if show is None:
-            show = Show(
-                search_title="신인감독 김연경",
-                release_season=2,
-                tvdb_season=2,
-                folder_name=FOLDER,
-                season_folder="Season 2",
-                tvdb_id=None,
-            )
+            show = Show(search_title="신인감독 김연경", folder_name=FOLDER, tvdb_id=None)
             s.add(show)
             s.flush()
-        ep = s.scalar(select(Episode).where(Episode.number == number))
+        row = s.scalar(select(Season).where(Season.show_id == show.id, Season.number == season))
+        if row is None:
+            row = Season(
+                show_id=show.id,
+                number=season,
+                release_season=season,
+                folder=folder or f"Season {season}",
+                followed=True,
+            )
+            s.add(row)
+            s.flush()
+        ep = s.scalar(
+            select(Episode).where(Episode.season_id == row.id, Episode.number == number)
+        )
         if ep is None:
-            ep = Episode(show_id=show.id, number=number)
+            ep = Episode(season_id=row.id, number=number, monitored=True)
             s.add(ep)
         if ep_state is not None or ep.state != "downloaded":
             ep.state = ep_state or "downloading"
@@ -167,7 +177,6 @@ def test_map_path_matches_whole_components_only():
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_moves_largest_video_only(db, http, dirs):
     downloads, tv = dirs
     tag = add_grab(db)
@@ -201,7 +210,6 @@ async def test_moves_largest_video_only(db, http, dirs):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_extension_lowercased_and_path_map_applied(db, http, dirs):
     downloads, tv = dirs
     set_setting_db(db, "path_map", f"/qbit-downloads={downloads}")
@@ -218,7 +226,6 @@ async def test_extension_lowercased_and_path_map_applied(db, http, dirs):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_existing_destination_not_overwritten(db, http, dirs):
     downloads, tv = dirs
     tag = add_grab(db)
@@ -242,7 +249,6 @@ async def test_existing_destination_not_overwritten(db, http, dirs):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_stalled_download_fails_after_timeout(db, http, dirs):
     downloads, _ = dirs
     tag = add_grab(db, progress=0.4, last_progress_at=utcnow() - timedelta(hours=7))
@@ -260,7 +266,6 @@ async def test_stalled_download_fails_after_timeout(db, http, dirs):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_slow_download_within_timeout_left_alone(db, http, dirs):
     downloads, _ = dirs
     tag = add_grab(db, progress=0.4, last_progress_at=utcnow() - timedelta(hours=5))
@@ -274,7 +279,6 @@ async def test_slow_download_within_timeout_left_alone(db, http, dirs):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_progress_update_resets_stall_clock(db, http, dirs):
     downloads, _ = dirs
     old = utcnow() - timedelta(hours=7)
@@ -291,7 +295,6 @@ async def test_progress_update_resets_stall_clock(db, http, dirs):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_missing_torrent_waits_before_failing(db, http, dirs):
     downloads, _ = dirs
     tag = add_grab(db)
@@ -312,7 +315,6 @@ async def test_missing_torrent_waits_before_failing(db, http, dirs):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_torrent_missing_for_15_minutes_marks_wanted(db, http, dirs):
     tag = add_grab(db)
     update_grab(db, tag, torrent_missing_since=utcnow() - timedelta(minutes=15, seconds=1))
@@ -326,7 +328,6 @@ async def test_torrent_missing_for_15_minutes_marks_wanted(db, http, dirs):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_torrent_seen_again_clears_missing_clock(db, http, dirs):
     downloads, _ = dirs
     tag = add_grab(db, progress=0.2)
@@ -340,7 +341,6 @@ async def test_torrent_seen_again_clears_missing_clock(db, http, dirs):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_tag_matches_exactly(db, http, dirs):
     downloads, _ = dirs
     tag = add_grab(db)  # kshow-1
@@ -354,7 +354,6 @@ async def test_tag_matches_exactly(db, http, dirs):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_duplicate_tag_touches_nothing(db, http, dirs):
     downloads, tv = dirs
     tag = add_grab(db)
@@ -376,7 +375,6 @@ async def test_duplicate_tag_touches_nothing(db, http, dirs):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_failed_and_done_grabs_untouched(db, http, dirs):
     downloads, tv = dirs
     states = ((2, "failed"), (3, "done"))
@@ -398,7 +396,6 @@ async def test_failed_and_done_grabs_untouched(db, http, dirs):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_add_failed_grab_with_torrent_is_adopted_and_processed(db, http, dirs):
     downloads, tv = dirs
     tag = add_grab(db, state="add_failed", ep_state="wanted",
@@ -416,7 +413,6 @@ async def test_add_failed_grab_with_torrent_is_adopted_and_processed(db, http, d
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_adopted_grab_gets_a_fresh_stall_clock(db, http, dirs):
     downloads, _ = dirs
     tag = add_grab(db, state="add_failed", ep_state="wanted",
@@ -431,7 +427,6 @@ async def test_adopted_grab_gets_a_fresh_stall_clock(db, http, dirs):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_add_failed_without_torrent_stays_add_failed(db, http, dirs):
     tag = add_grab(db, state="add_failed", ep_state="wanted")
     delete, _ = mock_qbit([])
@@ -445,7 +440,6 @@ async def test_add_failed_without_torrent_stays_add_failed(db, http, dirs):
 
 @respx.mock
 @pytest.mark.parametrize("other", ["downloading", "done"])
-@SEASONS_REWORK
 async def test_add_failed_duplicate_torrent_is_deleted(db, http, dirs, other):
     downloads, _ = dirs
     first = add_grab(db, state="add_failed", ep_state="wanted")
@@ -467,7 +461,6 @@ async def test_add_failed_duplicate_torrent_is_deleted(db, http, dirs, other):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_add_failed_for_downloaded_episode_deletes_torrent(db, http, dirs):
     downloads, _ = dirs
     tag = add_grab(db, state="add_failed", ep_state="downloaded")
@@ -481,7 +474,6 @@ async def test_add_failed_for_downloaded_episode_deletes_torrent(db, http, dirs)
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_source_outside_downloads_is_never_moved(db, http, dirs):
     downloads, tv = dirs
     tag = add_grab(db)
@@ -501,7 +493,6 @@ async def test_source_outside_downloads_is_never_moved(db, http, dirs):
 @pytest.mark.parametrize(
     "qstate", ["uploading", "stalledUP", "pausedUP", "stoppedUP", "queuedUP", "forcedUP"]
 )
-@SEASONS_REWORK
 async def test_every_seeding_state_is_filed(db, http, dirs, qstate):
     downloads, tv = dirs
     tag = add_grab(db)
@@ -521,7 +512,6 @@ async def test_every_seeding_state_is_filed(db, http, dirs, qstate):
     "qstate",
     ["moving", "checkingUP", "checkingDL", "checkingResumeData", "allocating", "metaDL"],
 )
-@SEASONS_REWORK
 async def test_busy_torrent_at_full_progress_waits_without_stalling(db, http, dirs, qstate):
     downloads, tv = dirs
     tag = add_grab(db, progress=1.0, last_progress_at=utcnow() - timedelta(hours=7))
@@ -540,7 +530,6 @@ async def test_busy_torrent_at_full_progress_waits_without_stalling(db, http, di
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_missing_source_in_seeding_state_retries_later(db, http, dirs):
     downloads, tv = dirs
     tag = add_grab(db)
@@ -568,7 +557,6 @@ async def test_missing_source_in_seeding_state_retries_later(db, http, dirs):
 
 @respx.mock
 @pytest.mark.parametrize("qstate", ["uploading", "missingFiles", "error"])
-@SEASONS_REWORK
 async def test_missing_source_for_an_hour_fails_and_deletes(db, http, dirs, qstate):
     downloads, tv = dirs
     tag = add_grab(db)
@@ -590,7 +578,6 @@ async def test_missing_source_for_an_hour_fails_and_deletes(db, http, dirs, qsta
 
 @respx.mock
 @pytest.mark.parametrize("qstate", ["missingFiles", "error"])
-@SEASONS_REWORK
 async def test_broken_torrent_waits_first(db, http, dirs, qstate):
     downloads, _ = dirs
     tag = add_grab(db, progress=0.3)
@@ -604,7 +591,6 @@ async def test_broken_torrent_waits_first(db, http, dirs, qstate):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_recovered_torrent_clears_missing_clock(db, http, dirs):
     downloads, _ = dirs
     tag = add_grab(db, progress=0.3)
@@ -617,7 +603,6 @@ async def test_recovered_torrent_clears_missing_clock(db, http, dirs):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_save_path_outside_downloads_is_never_moved(db, http, dirs):
     downloads, tv = dirs
     tag = add_grab(db)
@@ -633,7 +618,6 @@ async def test_save_path_outside_downloads_is_never_moved(db, http, dirs):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_no_video_file_fails_and_deletes(db, http, dirs):
     downloads, tv = dirs
     tag = add_grab(db)
@@ -654,7 +638,6 @@ async def test_no_video_file_fails_and_deletes(db, http, dirs):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_qbit_down_changes_nothing(db, http, dirs):
     tag = add_grab(db, last_progress_at=utcnow() - timedelta(hours=7))
     respx.post(f"{QBIT}/api/v2/auth/login").mock(side_effect=httpx.ConnectError("down"))
@@ -666,7 +649,6 @@ async def test_qbit_down_changes_nothing(db, http, dirs):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_qbit_error_on_files_changes_nothing(db, http, dirs):
     downloads, tv = dirs
     tag = add_grab(db)
@@ -683,7 +665,6 @@ async def test_qbit_error_on_files_changes_nothing(db, http, dirs):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_failed_cross_device_move_leaves_nothing_and_continues(
     db, http, dirs, monkeypatch
 ):
@@ -723,7 +704,6 @@ async def test_failed_cross_device_move_leaves_nothing_and_continues(
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_move_runs_off_the_event_loop_thread(db, http, dirs, monkeypatch):
     downloads, tv = dirs
     tag = add_grab(db)
@@ -745,7 +725,6 @@ async def test_move_runs_off_the_event_loop_thread(db, http, dirs, monkeypatch):
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_qbit_outage_in_downloads_notifies_once_and_recovery_once(db, http, dirs):
     tag = add_grab(db, progress=0.5)
     respx.post(f"{QBIT}/api/v2/auth/login").respond(
@@ -785,7 +764,6 @@ async def test_qbit_outage_in_downloads_notifies_once_and_recovery_once(db, http
 
 
 @respx.mock
-@SEASONS_REWORK
 async def test_qbit_error_on_one_grab_is_not_an_outage(db, http, dirs):
     old = utcnow() - timedelta(hours=7)
     tag4 = add_grab(db, progress=0.2, last_progress_at=old, number=4)
@@ -810,3 +788,25 @@ async def test_qbit_error_on_one_grab_is_not_an_outage(db, http, dirs):
     assert titles == ["Download failed"]
     with db() as s:
         assert get_setting(s, "qbit_outage_since") == ""
+
+
+@respx.mock
+@pytest.mark.parametrize("folder", ["Season 01", "Season 1"])
+async def test_files_into_the_episodes_season_folder(db, http, dirs, folder):
+    downloads, tv = dirs
+    add_grab(db, number=7)  # a season 2 episode of the same show
+    tag = add_grab(db, number=4, season=1, folder=folder)
+    write(downloads / "kshow/ep.mkv", b"v")
+    _, apprise = mock_qbit(
+        [torrent(tag, 1.0, downloads / "kshow")], [{"name": "ep.mkv", "size": 1}]
+    )
+
+    await process_downloads(make_deps(db, http, dirs))
+
+    dest = tv / FOLDER / folder / f"{FOLDER} - S01E04.mkv"
+    assert dest.read_bytes() == b"v"
+    assert not (tv / FOLDER / "Season 2").exists()
+    body = json.loads(apprise.calls.last.request.content)
+    assert body == {"title": "Episode added", "body": f"{FOLDER} S01E04 is in Plex"}
+    _, ep = state(db, tag)
+    assert (ep.state, ep.filed_path) == ("downloaded", str(dest))
