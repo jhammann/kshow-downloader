@@ -57,6 +57,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.check_lock = asyncio.Lock()
         app.state.downloads_lock = asyncio.Lock()
         app.state.tasks = set()
+        app.state.searches = set()  # (show_id, season, episodes) queued or running
         app.state.scheduler = None
         if not settings.disable_scheduler:
             app.state.scheduler = start_scheduler(

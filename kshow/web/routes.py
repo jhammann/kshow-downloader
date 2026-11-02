@@ -207,7 +207,14 @@ def _session(request: Request) -> Session:
     return request.app.state.deps.session_factory()
 
 
+# URL numbers outside these bounds are a 404 (SQLite integers stop at 2**63 - 1).
+MAX_SHOW_ID = 2**63 - 1
+MAX_EPISODE = 9999
+
+
 def _get_show(session: Session, show_id: int) -> Show:
+    if not 1 <= show_id <= MAX_SHOW_ID:
+        raise HTTPException(status_code=404, detail="Show not found")
     show = session.get(Show, show_id)
     if show is None:
         raise HTTPException(status_code=404, detail="Show not found")
@@ -697,6 +704,8 @@ def _season_url(show_id: int, number: int) -> str:
 
 def _get_season(session: Session, show_id: int, number: int) -> Season:
     _get_show(session, show_id)
+    if not 1 <= number <= 99:
+        raise HTTPException(status_code=404, detail="Season not found")
     season = session.scalar(
         select(Season).where(Season.show_id == show_id, Season.number == number)
     )
@@ -744,7 +753,7 @@ async def _show_page(
         status=status_line(show, episodes, grabs, today),
         card=card,
         errors=errors or [],
-        can_resume=show.status == "stopped" and any(s.followed for s in seasons),
+        can_resume=show.status in ("stopped", "finished") and any(s.followed for s in seasons),
     )
 
 
@@ -776,10 +785,11 @@ async def show_stop(request: Request, show_id: int):
 
 @router.post("/shows/{show_id}/follow")
 async def show_follow_again(request: Request, show_id: int):
-    """Follow a stopped show again: its followed seasons are fetched automatically again."""
+    """Follow a stopped or finished show again: its followed seasons are fetched
+    automatically again."""
     with _session(request) as session:
         show = _get_show(session, show_id)
-        resumed = show.status == "stopped"
+        resumed = show.status in ("stopped", "finished")
         if resumed:
             show.status = "following"
             session.commit()
@@ -805,6 +815,8 @@ async def episode_search(request: Request, show_id: int, number: int, episode: i
     with _session(request) as session:
         season = _get_season(session, show_id, number)
         show = season.show
+        if not 1 <= episode <= MAX_EPISODE:
+            raise HTTPException(status_code=404, detail="Episode not found")
         ep = session.scalar(
             select(Episode).where(Episode.season_id == season.id, Episode.number == episode)
         )
@@ -823,8 +835,10 @@ async def episode_search(request: Request, show_id: int, number: int, episode: i
 async def season_follow(request: Request, show_id: int, number: int):
     """Turn "Following new episodes" on or off for one season.
 
-    On: episodes airing from today (or without a date) that aren't downloaded yet become
-    monitored. Off: nothing is fetched automatically any more; episode rows stay as they are.
+    On: of the episodes not downloaded yet, exactly those airing from today (or without a
+    date) are monitored, so episodes that aired while the season was off are left for
+    manual search. Off: nothing is fetched automatically any more; episode rows stay as they
+    are.
     """
     value = str((await request.form()).get("followed", ""))
     if value not in ("0", "1"):
@@ -841,8 +855,7 @@ async def season_follow(request: Request, show_id: int, number: int):
                     Episode.state.not_in(("downloaded", "downloading")),
                 )
             ):
-                if ep.tvdb_airdate is None or ep.tvdb_airdate >= today:
-                    ep.monitored = True
+                ep.monitored = ep.tvdb_airdate is None or ep.tvdb_airdate >= today
             log.info("following season %d of show %d from %s", number, show_id, today)
         elif value == "0" and season.followed:
             season.followed = False

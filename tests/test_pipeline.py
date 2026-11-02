@@ -1351,3 +1351,50 @@ async def test_finished_ignores_monitored_episodes_of_unfollowed_seasons(
 
     with db() as s:
         assert s.get(Show, show_id).status == "finished"
+
+
+def _finish(db, show_id):
+    with db() as s:
+        s.get(Show, show_id).status = "finished"
+        s.commit()
+
+
+@respx.mock
+async def test_finished_show_follows_again_when_tvdb_adds_a_season(db, http, tmp_path, today):
+    mock_tvdb(77, [(2, 1, date(2026, 9, 1)), (3, 1, today + timedelta(days=5))])
+    search = respx.get(f"{SITE}/search").respond(200, text=search_page())
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db, tvdb_id=77)
+    _finish(db, show_id)
+
+    await check_all_shows(make_deps(db, http, tmp_path, tvdb=True))
+
+    with db() as s:
+        show = s.get(Show, show_id)
+        assert (show.status, show.max_known_season) == ("following", 3)
+    assert seasons(db, show_id)[3].followed is True
+    assert episodes(db, show_id, season=3)[1].monitored is True
+    assert sent(apprise) == [
+        ("New season", "The Wonder Coach season 3 is announced; kshow will follow it.")
+    ]
+    assert not search.called  # only the sync: the next check searches and grabs
+
+
+@respx.mock
+async def test_finished_show_without_new_season_stays_finished(db, http, tmp_path, today):
+    mock_tvdb(77, [(2, 1, date(2026, 9, 1)), (2, 2, date(2026, 9, 8))])
+    search = respx.get(f"{SITE}/search").respond(200, text=search_page())
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db, tvdb_id=77)
+    _finish(db, show_id)
+    with db() as s:  # a finished show without TVDB is never synced
+        s.add(Show(search_title="x", folder_name="X", status="finished"))
+        s.commit()
+
+    await check_all_shows(make_deps(db, http, tmp_path, tvdb=True))
+
+    with db() as s:
+        assert s.get(Show, show_id).status == "finished"
+        assert s.scalar(select(Show).where(Show.folder_name == "X")).status == "finished"
+    assert sorted(seasons(db, show_id)) == [2]
+    assert not search.called and not apprise.called

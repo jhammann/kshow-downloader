@@ -868,13 +868,50 @@ def test_follow_again_only_for_stopped_show_with_a_followed_season(client, trigg
     nothing_followed = _add_show(client, folder_name="Old", tvdb_id=7,
                                  seasons=((1, False),), status="stopped")
     assert "Follow again" not in client.get(f"/shows/{nothing_followed}").text
+
+
+def test_follow_again_for_finished_show(client, triggered):
+    """A finished show is never a dead end: it can be followed again."""
     finished = _add_show(client, folder_name="Done", tvdb_id=8, status="finished")
-    assert "Follow again" not in client.get(f"/shows/{finished}").text
-    # a finished show is not followed again by this button
-    client.post(f"/shows/{finished}/follow")
+    page = client.get(f"/shows/{finished}").text
+    assert f'action="/shows/{finished}/follow"' in page and "Follow again" in page
+    r = client.post(f"/shows/{finished}/follow")
+    assert r.status_code == 303
     with _session(client) as s:
-        assert s.get(Show, finished).status == "finished"
-    assert triggered == [show_id]
+        assert s.get(Show, finished).status == "following"
+    assert triggered == [finished]
+    # following already: nothing to do
+    client.post(f"/shows/{finished}/follow")
+    assert triggered == [finished]
+
+
+HUGE = "99999999999999999999"
+
+
+def test_oversized_numbers_in_urls_are_404(client, searched, triggered):
+    show_id = _add_show(client)
+    _add_ep(client, show_id, 1)
+    gets = [f"/shows/{HUGE}", f"/shows/{2**63}", "/shows/0"]
+    posts = [
+        (f"/shows/{HUGE}/search", {}),
+        (f"/shows/{HUGE}/stop", {}),
+        (f"/shows/{HUGE}/follow", {}),
+        (f"/shows/{HUGE}/seasons/2/search", {}),
+        (f"/shows/{show_id}/seasons/{HUGE}/search", {}),
+        (f"/shows/{show_id}/seasons/100/search", {}),
+        (f"/shows/{show_id}/seasons/0/search", {}),
+        (f"/shows/{show_id}/seasons/{HUGE}/episodes/1/search", {}),
+        (f"/shows/{show_id}/seasons/2/episodes/{HUGE}/search", {}),
+        (f"/shows/{show_id}/seasons/2/episodes/10000/search", {}),
+        (f"/shows/{show_id}/seasons/2/episodes/0/search", {}),
+        (f"/shows/{show_id}/seasons/{HUGE}/follow", {"followed": "1"}),
+        (f"/shows/{show_id}/seasons/{HUGE}/release-season", {"release_season": "1"}),
+    ]
+    for url in gets:
+        assert client.get(url).status_code == 404, url
+    for url, data in posts:
+        assert client.post(url, data=data).status_code == 404, url
+    assert searched == [] and triggered == []
 
 
 def test_search_now_and_episode_search(client, triggered, searched, today):
@@ -1393,3 +1430,17 @@ def test_unreadable_library_is_unknown_not_missing(client, settings, searched, m
 
 def test_route_helpers_have_a_single_definition():
     assert not hasattr(routes, "_scan_season") and not hasattr(routes, "_files_on_disk")
+
+
+def test_refollow_resets_monitoring_to_from_today(client, today):
+    """Episodes that aired while the season was unfollowed are not fetched after a re-follow."""
+    show_id = _add_show(client, seasons=((1, False),))
+    _add_ep(client, show_id, 1, season=1, aired=today - timedelta(days=5), monitored=True)
+    _add_ep(client, show_id, 2, season=1, aired=today + timedelta(days=2), monitored=False)
+    _add_ep(client, show_id, 3, season=1, aired=today - timedelta(days=30), monitored=True,
+            state="failed")
+    _add_ep(client, show_id, 4, season=1, aired=today - timedelta(days=30), monitored=True,
+            state="downloaded")
+    client.post(f"/shows/{show_id}/seasons/1/follow", data={"followed": "1"})
+    monitored = {n: _episode_row(client, show_id, n, season=1).monitored for n in range(1, 5)}
+    assert monitored == {1: False, 2: True, 3: False, 4: True}

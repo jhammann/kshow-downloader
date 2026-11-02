@@ -16,8 +16,12 @@
   <form method="post" action="/shows/{{ show.id }}/search"><button class="primary" type="submit">Search now</button></form>
   <form method="post" action="/shows/{{ show.id }}/stop" onsubmit="return confirm('Stop following? Nothing is downloaded by itself any more. Files stay in the library.')"><button class="ghost" type="submit">Stop following</button></form>
 </div>
-{% elif show.status == "stopped" %}
+{% else %}
+{% if show.status == "stopped" %}
 <p class="card note" role="status">Stopped: nothing is downloaded by itself. Search still works.</p>
+{% elif show.status == "finished" %}
+<p class="card note" role="status">Finished: TVDB says this show has ended. A new season brings it back by itself. Search still works.</p>
+{% endif %}
 {% if can_resume %}
 <form class="actions-single" method="post" action="/shows/{{ show.id }}/follow"><button class="primary" type="submit">Follow again</button></form>
 {% endif %}

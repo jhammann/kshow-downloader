@@ -80,8 +80,17 @@ def trigger_check(app, show_id: int | None) -> None:
 
 def trigger_search(app, show_id: int, season_number: int, numbers: list[int] | None) -> None:
     """Run a one-shot manual search (one episode, or a whole season with numbers=None) under
-    the shared check lock, so it never overlaps a check or another search."""
+    the shared check lock, so it never overlaps a check or another search.
+
+    The same search already queued or running (e.g. a double tap) is not queued again.
+    """
     deps: Deps = app.state.deps
+    key = (show_id, season_number, tuple(numbers) if numbers is not None else None)
+    searches: set = app.state.searches
+    if key in searches:
+        log.info("manual search %s is already queued", key)
+        return
+    searches.add(key)
     task = asyncio.get_running_loop().create_task(
         _guarded(
             "manual search",
@@ -91,3 +100,4 @@ def trigger_search(app, show_id: int, season_number: int, numbers: list[int] | N
     )
     app.state.tasks.add(task)
     task.add_done_callback(app.state.tasks.discard)
+    task.add_done_callback(lambda _: searches.discard(key))

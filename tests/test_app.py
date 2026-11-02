@@ -88,3 +88,33 @@ async def test_trigger_check_swallows_errors(tmp_path, monkeypatch):
     async with app.router.lifespan_context(app):
         trigger_check(app, None)
         await asyncio.gather(*app.state.tasks)
+
+
+async def test_trigger_search_skips_a_search_already_queued_or_running(tmp_path, monkeypatch):
+    calls = []
+    release = asyncio.Event()
+
+    async def fake_search(deps, show_id, season_number, numbers):
+        calls.append((show_id, season_number, numbers))
+        await release.wait()
+        if numbers == [9]:
+            raise ValueError("bad")
+
+    monkeypatch.setattr("kshow.scheduler.search_episodes", fake_search)
+    app = create_app(_settings(tmp_path))
+    async with app.router.lifespan_context(app):
+        for _ in range(2):  # a double tap
+            trigger_search(app, 1, 2, [3])
+            trigger_search(app, 1, 2, None)
+            trigger_search(app, 1, 2, [9])
+        trigger_search(app, 1, 1, [3])  # a different season is a different search
+        await asyncio.sleep(0.05)
+        release.set()
+        await asyncio.gather(*app.state.tasks)
+        assert calls == [(1, 2, [3]), (1, 2, None), (1, 2, [9]), (1, 1, [3])]
+        assert not app.state.searches  # cleared after success and after the error
+
+        trigger_search(app, 1, 2, [9])  # can be asked for again once finished
+        await asyncio.gather(*app.state.tasks)
+        assert calls[-1] == (1, 2, [9])
+        assert not app.state.searches

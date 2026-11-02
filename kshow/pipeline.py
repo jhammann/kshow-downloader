@@ -545,13 +545,40 @@ async def check_show(deps: Deps, show_id: int) -> None:
                     log.info("%s finished", show.folder_name)
 
 
+async def _revive_if_new_season(deps: Deps, show_id: int) -> None:
+    """Sync a finished show's seasons (nothing else); a new season makes it followed again.
+
+    The sync follows the new season and sends the "New season" notification; the next check
+    searches and grabs as for any following show.
+    """
+    with deps.session_factory() as session:
+        show = session.get(Show, show_id)
+        if show is None or show.status != "finished":
+            return
+        known = show.max_known_season
+        if await sync_seasons(session, deps, show) and show.max_known_season > known:
+            show.status = "following"
+            session.commit()
+            log.info("%s has a new season; following it again", show.folder_name)
+
+
 async def check_all_shows(deps: Deps) -> None:
     with deps.session_factory() as session:
         show_ids = session.scalars(
             select(Show.id).where(Show.status == "following").order_by(Show.id)
+        ).all()
+        finished_ids = session.scalars(
+            select(Show.id)
+            .where(Show.status == "finished", Show.tvdb_id.is_not(None))
+            .order_by(Show.id)
         ).all()
     for show_id in show_ids:
         try:
             await check_show(deps, show_id)
         except Exception:
             log.exception("check failed for show %s", show_id)
+    for show_id in finished_ids:
+        try:
+            await _revive_if_new_season(deps, show_id)
+        except Exception:
+            log.exception("season sync failed for finished show %s", show_id)
