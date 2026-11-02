@@ -524,3 +524,20 @@ async def test_poster_backfill_rejects_non_tvdb_host(db, http, tmp_path):
 
     with db() as s:
         assert s.get(Show, show_id).poster_url is None
+
+
+@respx.mock
+async def test_missing_downloaded_episode_is_not_regrabbed_automatically(db, http, tmp_path):
+    (tmp_path / "The Wonder Coach" / "Season 2").mkdir(parents=True)
+    mock_search("신인감독 김연경 2.E04.261101.720p-NEXT")
+    mock_post(1)
+    add = mock_qbit()
+    show_id = add_show(db)
+    with db() as s:
+        s.add(Episode(show_id=show_id, number=4, state="downloaded"))
+        s.commit()
+
+    await check_show(make_deps(db, http, tmp_path), show_id)
+
+    assert add.call_count == 0
+    assert episodes(db, show_id)[4].state == "downloaded"

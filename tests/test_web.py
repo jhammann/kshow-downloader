@@ -861,3 +861,64 @@ def test_static_assets_are_versioned_by_content(client):
         digest = hashlib.sha256((STATIC_DIR / name).read_bytes()).hexdigest()[:12]
         assert f"/static/{name}?v={digest}" in page
     assert not re.search(r'"/static/[^"?]+"', page)
+
+
+# --- download again (file deleted by hand) ----------------------------------------
+
+
+def _downloaded_eps(client, settings, present=(3,), missing=(4,)) -> int:
+    show_id = _add_show(client)
+    season = settings.tv_dir / "The Wonder Coach" / "Season 2"
+    season.mkdir(parents=True, exist_ok=True)
+    with _session(client) as s:
+        for n in (*present, *missing):
+            ep = Episode(show_id=show_id, number=n, state="downloaded")
+            s.add(ep)
+            s.flush()
+            for i, state in enumerate(("done", "failed", "add_failed")):
+                s.add(Grab(episode_id=ep.id, post_url=f"u{n}-{i}", release_name="r",
+                           qbit_tag=f"kshow-{n}{i}", state=state))
+        s.commit()
+    for n in present:
+        (season / f"The Wonder Coach - S02E{n:02}.mp4").write_bytes(b"video")
+    return show_id
+
+
+def test_missing_file_shows_pill_and_download_again(client, settings):
+    show_id = _downloaded_eps(client, settings)
+    page = client.get(f"/shows/{show_id}").text
+    assert page.count('pill-late state">Missing') == 1
+    assert page.count("Download again") == 1
+    assert f'action="/shows/{show_id}/episodes/4/retry"' in page
+    assert f'action="/shows/{show_id}/episodes/3/retry"' not in page
+    assert page.count('pill-ok state">downloaded') == 1
+
+
+def test_no_missing_pill_while_file_exists(client, settings):
+    show_id = _downloaded_eps(client, settings, present=(3, 4), missing=())
+    page = client.get(f"/shows/{show_id}").text
+    assert "Missing" not in page and "Download again" not in page
+
+
+def test_download_again_resets_missing_episode(client, settings, triggered):
+    show_id = _downloaded_eps(client, settings)
+    r = client.post(f"/shows/{show_id}/episodes/4/retry")
+    assert r.status_code == 303 and r.headers["location"] == f"/shows/{show_id}"
+    with _session(client) as s:
+        eps = {e.number: e for e in s.scalars(select(Episode))}
+        assert eps[4].state == "wanted"
+        assert s.scalars(select(Grab).where(Grab.episode_id == eps[4].id)).all() == []
+        assert eps[3].state == "downloaded"
+        assert len(s.scalars(select(Grab).where(Grab.episode_id == eps[3].id)).all()) == 3
+    assert triggered == [show_id]
+
+
+def test_download_again_ignores_present_file(client, settings, triggered):
+    show_id = _downloaded_eps(client, settings)
+    r = client.post(f"/shows/{show_id}/episodes/3/retry")
+    assert r.status_code == 303 and r.headers["location"] == f"/shows/{show_id}"
+    with _session(client) as s:
+        ep = s.scalar(select(Episode).where(Episode.number == 3))
+        assert ep.state == "downloaded"
+        assert len(s.scalars(select(Grab).where(Grab.episode_id == ep.id)).all()) == 3
+    assert triggered == []

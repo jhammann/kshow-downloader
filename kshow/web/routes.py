@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from kshow.auth import require_same_origin, require_user
 from kshow.db import Episode, Grab, Show, SourceRow, get_setting, set_setting, utcnow
-from kshow.library import season_folder_name, suggest_folder
+from kshow.library import existing_episodes, season_folder_name, suggest_folder
 from kshow.releases import parse_user_input
 from kshow.scheduler import reschedule_check, trigger_check
 from kshow.tvdb import TvdbError, TvdbMatch, safe_image_url
@@ -540,6 +540,12 @@ async def add_show(request: Request):
 # --- show detail ------------------------------------------------------------------
 
 
+def _files_on_disk(request: Request, show: Show) -> set[int]:
+    """Episode numbers whose video file is in the show's season folder."""
+    tv_dir = request.app.state.settings.tv_dir
+    return existing_episodes(tv_dir / show.folder_name / show.season_folder, show.tvdb_season)
+
+
 @router.get("/shows/{show_id}", response_class=HTMLResponse)
 async def show_detail(request: Request, show_id: int):
     with _session(request) as session:
@@ -553,7 +559,15 @@ async def show_detail(request: Request, show_id: int):
             .order_by(Grab.id)
         ).all()
     latest = {g.episode_id: g for g in grabs}  # ordered by id, so the last one wins
-    rows = [{"ep": e, "grab": latest.get(e.id)} for e in episodes]
+    on_disk = _files_on_disk(request, show)
+    rows = [
+        {
+            "ep": e,
+            "grab": latest.get(e.id),
+            "missing": e.state == "downloaded" and e.number not in on_disk,
+        }
+        for e in episodes
+    ]
     return _render(
         request,
         "show.html",
@@ -583,13 +597,14 @@ async def episode_retry(request: Request, show_id: int, number: int):
         )
         if ep is None:
             raise HTTPException(status_code=404, detail="Episode not found")
-        if ep.state not in ("wanted", "failed"):
+        # A downloaded episode whose file was deleted can be downloaded again (by hand only).
+        missing = ep.state == "downloaded" and number not in _files_on_disk(request, show)
+        if ep.state not in ("wanted", "failed") and not missing:
             return _redirect(f"/shows/{show_id}")
         ep.state = "wanted"
+        cleared = ("done", "failed", "add_failed") if missing else ("failed", "add_failed")
         session.execute(
-            delete(Grab).where(
-                Grab.episode_id == ep.id, Grab.state.in_(("failed", "add_failed"))
-            )
+            delete(Grab).where(Grab.episode_id == ep.id, Grab.state.in_(cleared))
         )
         session.commit()
         following = show.status == "following"

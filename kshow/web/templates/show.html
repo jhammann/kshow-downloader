@@ -29,11 +29,17 @@
       <span class="episode-meta">
         {% if row.ep.tvdb_airdate %}<span class="muted">Aired {{ row.ep.tvdb_airdate.strftime("%d %b %Y") }}</span>{% endif %}
       </span>
+      {% if row.missing %}
+      <span class="pill pill-late state">Missing</span>
+      {% else %}
       <span class="pill pill-{{ kinds.get(row.ep.state, 'waiting') }} state">{{ row.ep.state }}{% if row.ep.state == "downloading" and row.grab and row.grab.state == "downloading" %} {{ (row.grab.progress * 100) | int }}%{% endif %}</span>
+      {% endif %}
     </div>
     {% if row.grab %}<p class="muted release">{{ row.grab.release_name }}{% if row.grab.state in ("failed", "add_failed") %} — failed{% endif %}</p>{% endif %}
     {% if row.ep.state in ("wanted", "failed") and show.status == "following" %}
     <form method="post" action="/shows/{{ show.id }}/episodes/{{ row.ep.number }}/retry"><button class="small" type="submit">Retry</button></form>
+    {% elif row.missing and show.status == "following" %}
+    <form method="post" action="/shows/{{ show.id }}/episodes/{{ row.ep.number }}/retry"><button class="small" type="submit">Download again</button></form>
     {% endif %}
   </li>
 {% else %}
