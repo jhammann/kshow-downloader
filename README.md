@@ -140,14 +140,16 @@ name under it ends in "— failed".
 **Delete show**, at the bottom of a show's page, opens a confirm page. Deleting a show:
 
 - makes kshow forget the show, its seasons and its download history;
-- stops the show's downloads that are still running in qBittorrent and removes their partial
-  files. Only torrents in kshow's category that carry one of this show's `kshow-<id>` tags are
-  touched. If qBittorrent can't be reached, nothing is deleted; try again later.
+- removes the show's torrents that are still in qBittorrent (running, or kept after a failed
+  move into the library), with their files in the download folder. Only torrents in kshow's
+  category that carry one of this show's `kshow-<id>` tags are touched. If qBittorrent can't
+  be reached, nothing is deleted; try again later.
 
 The show's folder in the TV library stays, unless you tick **Also delete the folder from the TV
 library** (off by default). The confirm page shows the exact path and how many files are in it.
 kshow refuses to delete the folder (and then deletes nothing at all) when it is a symlink, isn't
-directly inside `/tv`, doesn't exist, or is also used by another show. Symlinks inside the folder
+directly inside `/tv`, doesn't exist, or is also used by another show (also under a name that
+differs only in case or Unicode normalisation). Symlinks inside the folder
 are removed, never followed. If removing the folder fails part-way, the show is still forgotten
 and the show list says so; check what is left of the folder.
 

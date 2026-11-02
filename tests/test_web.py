@@ -1823,8 +1823,126 @@ def test_delete_missing_or_oversized_show_is_404(client):
     _add_show(client)
     for show_id in (HUGE, 2**63, 0, 999):
         assert client.get(f"/shows/{show_id}/delete").status_code == 404, show_id
+    for show_id in (HUGE, 2**63, 0):
         assert _delete(client, show_id, "1").status_code == 404, show_id
     assert _shows(client) == {FOLDER}
+
+
+@respx.mock
+def test_double_submitted_delete_redirects_home(del_client):
+    client = del_client
+    show_id = _add_show(client)
+    _mock_qbit([])
+    assert _delete(client, show_id).status_code == 303
+    r = _delete(client, show_id)
+    assert r.status_code == 303 and r.headers["location"] == "/"
+
+
+@respx.mock
+def test_delete_uses_stored_tags_and_removes_failed_grabs_torrents(del_client):
+    client = del_client
+    show_id = _add_show(client)
+    ep = _add_ep(client, show_id, 1)
+    with _session(client) as s:
+        s.add_all([
+            Grab(episode_id=ep, post_url="a", release_name="r", qbit_tag="kshow-custom",
+                 state="downloading"),
+            Grab(episode_id=ep, post_url="b", release_name="r", qbit_tag="", state="downloading"),
+        ])
+        s.commit()
+    failed_tag = _grab(client, ep, state="failed")  # a failed move keeps its torrent
+    done_tag = _grab(client, ep, state="done")
+    delete, _ = _mock_qbit([
+        _torrent(H1, "kshow-custom"),
+        _torrent(H2, failed_tag),
+        _torrent(H3, done_tag),
+        _torrent(H4, ""),
+    ])
+    assert _delete(client, show_id).status_code == 303
+    assert sorted(_deleted_hashes(delete)) == [(H1, "true"), (H2, "true")]
+
+
+@respx.mock
+def test_delete_forgets_show_before_removing_folder(del_client, monkeypatch):
+    client = del_client
+    show_id = _add_show(client)
+    _library_folder(client)
+    seen = []
+    real_rmtree = __import__("shutil").rmtree
+
+    def rmtree(path, *, onexc):
+        with _session(client) as s:
+            seen.append(s.get(Show, show_id))
+        real_rmtree(path, onexc=onexc)
+
+    monkeypatch.setattr("kshow.delete.shutil.rmtree", rmtree)
+    _mock_qbit([])
+    assert _delete(client, show_id, "1").status_code == 303
+    assert seen == [None]
+    assert not (_tv(client) / FOLDER).exists()
+
+
+@respx.mock
+def test_failed_commit_leaves_folder_alone(del_client, monkeypatch):
+    from sqlalchemy.orm import Session as OrmSession
+
+    client = del_client
+    show_id = _add_show(client)
+    folder = _library_folder(client)
+    _mock_qbit([])
+
+    def boom(self):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(OrmSession, "commit", boom)
+    with pytest.raises(RuntimeError, match="disk full"):
+        _delete(client, show_id, "1")
+    monkeypatch.undo()
+    assert (folder / "poster.jpg").exists()
+    assert _shows(client) == {FOLDER}
+
+
+@respx.mock
+def test_delete_refuses_folder_of_unicode_equal_name(del_client):
+    import unicodedata
+
+    client = del_client
+    nfc = unicodedata.normalize("NFC", "신인감독")
+    nfd = unicodedata.normalize("NFD", "신인감독")
+    assert nfc != nfd
+    show_id = _add_show(client, folder_name=nfc)
+    _add_show(client, folder_name=nfd, tvdb_id=456)
+    folder = _library_folder(client, nfc)
+    delete, _ = _mock_qbit([])
+    r = _delete(client, show_id, "1")
+    assert r.status_code == 400 and "another show" in r.text.lower()
+    assert (folder / "poster.jpg").exists()
+    with _session(client) as s:
+        assert len(s.scalars(select(Show)).all()) == 2
+
+
+@respx.mock
+def test_delete_refuses_folder_that_is_the_same_directory_on_disk(del_client, monkeypatch):
+    """Another show's differently named folder that the filesystem maps to the same inode."""
+    from kshow import delete as show_delete
+
+    client = del_client
+    show_id = _add_show(client)
+    _add_show(client, folder_name="Other Show", tvdb_id=456)
+    folder = _library_folder(client)
+    other = _library_folder(client, "Other Show")
+    real = show_delete._dir_id
+
+    def same_inode(path, follow):
+        if Path(path) == other:
+            return real(folder, False)
+        return real(path, follow)
+
+    monkeypatch.setattr(show_delete, "_dir_id", same_inode)
+    delete, _ = _mock_qbit([])
+    r = _delete(client, show_id, "1")
+    assert r.status_code == 400 and "another show" in r.text.lower()
+    assert (folder / "poster.jpg").exists() and (other / "poster.jpg").exists()
 
 
 @pytest.mark.parametrize("lock", ["check_lock", "downloads_lock"])

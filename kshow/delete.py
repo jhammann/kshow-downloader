@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import shutil
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,7 +19,9 @@ from kshow.pipeline import Deps
 
 log = logging.getLogger(__name__)
 
-ACTIVE_GRAB_STATES = ("downloading", "add_failed")
+# Grabs whose torrent may still be in qBittorrent: running, added despite a reported failure,
+# or failed with the torrent kept (a failed move into the library keeps it on purpose).
+TORRENT_GRAB_STATES = ("downloading", "add_failed", "failed")
 
 
 class DeleteRefused(Exception):
@@ -67,18 +70,29 @@ def folder_problem(tv_dir: Path, folder_name: str, other_folders: list[str]) -> 
         return "The folder is not directly inside the TV library."
     if not target.is_dir():
         return "This is not a folder."
-    same = folder_name.casefold()
+    key = _name_key(folder_name)
+    target_id = _dir_id(target, follow=False)
     for other in other_folders:
-        if other.casefold() == same or _resolves_to(tv_dir, other, resolved):
+        if _name_key(other) == key or (
+            target_id is not None and _dir_id(tv_dir / other, follow=True) == target_id
+        ):
             return "Another show uses this folder too, so it is left alone."
     return None
 
 
-def _resolves_to(tv_dir: Path, name: str, resolved: Path) -> bool:
+def _name_key(name: str) -> str:
+    """Folder names a normalisation- or case-insensitive filesystem may treat as the same."""
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def _dir_id(path: Path, follow: bool) -> tuple[int, int] | None:
+    """(device, inode) of path, or None when it can't be read: the same directory on disk
+    has the same id whatever name reaches it."""
     try:
-        return (tv_dir / name).resolve() == resolved
-    except (OSError, ValueError, RuntimeError):
-        return False
+        st = os.stat(path) if follow else os.lstat(path)
+    except (OSError, ValueError):
+        return None
+    return (st.st_dev, st.st_ino)
 
 
 def _count_files(path: Path) -> int:
@@ -131,7 +145,8 @@ async def delete_show(
     """Delete the show under both locks, so no check or download pass sees it half-deleted.
 
     Lock order is check_lock, then downloads_lock; nothing else takes both.
-    Raises ShowGone, DeleteRefused (nothing changed) or QbitError (nothing changed).
+    Raises ShowGone, DeleteRefused (nothing changed) or QbitError (the show is kept; torrents
+    already removed stay removed).
     """
     async with check_lock, downloads_lock:
         with deps.session_factory() as session:
@@ -146,43 +161,43 @@ async def delete_show(
                 if problem is not None:
                     raise DeleteRefused(problem)
 
-            season_ids = list(session.scalars(select(Season.id).where(Season.show_id == show_id)))
-            episode_ids = list(
-                session.scalars(select(Episode.id).where(Episode.season_id.in_(season_ids)))
-            )
-            active = list(
+            category = get_setting(session, "qbit_category")
+            seasons = select(Season.id).where(Season.show_id == show_id)
+            episodes = select(Episode.id).where(Episode.season_id.in_(seasons))
+            tags = set(
                 session.scalars(
-                    select(Grab.id).where(
-                        Grab.episode_id.in_(episode_ids), Grab.state.in_(ACTIVE_GRAB_STATES)
+                    select(Grab.qbit_tag).where(
+                        Grab.episode_id.in_(episodes),
+                        Grab.state.in_(TORRENT_GRAB_STATES),
+                        Grab.qbit_tag != "",
                     )
                 )
             )
-            if active:
-                tags = {f"kshow-{grab_id}" for grab_id in active}
-                category = get_setting(session, "qbit_category")
-                torrents = await deps.qbit.torrents(category)
-                for torrent in torrents:
+            if tags:
+                for torrent in await deps.qbit.torrents(category):
                     if tags.intersection(torrent.tags):
                         log.info("removing torrent %s of deleted show %s", torrent.hash, name)
                         await deps.qbit.delete(torrent.hash, delete_files=True)
 
-            folder_deleted = folder_error = False
-            if delete_folder:
-                failures = await asyncio.to_thread(_rmtree, tv_dir / name)
-                if failures:
-                    folder_error = True
-                    log.error(
-                        "deleting folder %s failed part-way: %s", tv_dir / name, "; ".join(failures)
-                    )
-                else:
-                    folder_deleted = True
-                    log.info("deleted folder %s", tv_dir / name)
-
-            session.execute(delete(Grab).where(Grab.episode_id.in_(episode_ids)))
-            session.execute(delete(Episode).where(Episode.id.in_(episode_ids)))
-            session.execute(delete(Season).where(Season.id.in_(season_ids)))
+            # Forget the show first: a failing commit must never leave the folder gone while
+            # the show remains. Subqueries pick up rows added while awaiting qBittorrent.
+            session.execute(delete(Grab).where(Grab.episode_id.in_(episodes)))
+            session.execute(delete(Episode).where(Episode.season_id.in_(seasons)))
+            session.execute(delete(Season).where(Season.show_id == show_id))
             session.execute(delete(Show).where(Show.id == show_id))
             session.commit()
+
+        folder_deleted = folder_error = False
+        if delete_folder:
+            failures = await asyncio.to_thread(_rmtree, tv_dir / name)
+            if failures:
+                folder_error = True
+                log.error(
+                    "deleting folder %s failed part-way: %s", tv_dir / name, "; ".join(failures)
+                )
+            else:
+                folder_deleted = True
+                log.info("deleted folder %s", tv_dir / name)
     log.info("deleted show %s (id %d)", name, show_id)
     body = f"{name} was removed from kshow"
     if folder_deleted:

@@ -929,15 +929,16 @@ async def show_delete_confirm(request: Request, show_id: int):
 async def show_delete_post(request: Request, show_id: int):
     """Delete the show; its library folder only when delete_folder is exactly "1"."""
     delete_folder = str((await request.form()).get("delete_folder", "")) == "1"
-    with _session(request) as session:
-        _get_show(session, show_id)
+    if not 1 <= show_id <= MAX_SHOW_ID:
+        raise HTTPException(status_code=404, detail="Show not found")
     state = request.app.state
     try:
         result = await show_delete.delete_show(
             state.deps, state.check_lock, state.downloads_lock, show_id, delete_folder
         )
     except show_delete.ShowGone:
-        raise HTTPException(status_code=404, detail="Show not found") from None
+        # Most likely a double-submitted delete: the first one already removed it.
+        return _redirect("/")
     except show_delete.DeleteRefused as e:
         log.warning("not deleting show %d: %s", show_id, e)
         return await _delete_page(
