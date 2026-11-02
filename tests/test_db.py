@@ -2,17 +2,25 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from kshow.db import Episode, Grab, Show, SourceRow, get_setting, init_db, set_setting, utcnow
+from kshow.db import (
+    Episode,
+    Grab,
+    Season,
+    Show,
+    SourceRow,
+    get_setting,
+    init_db,
+    set_setting,
+    utcnow,
+)
 
 
 def make_show() -> Show:
-    return Show(
-        search_title="신인감독 김연경",
-        release_season=2,
-        tvdb_season=2,
-        folder_name="The Rookie Coach",
-        season_folder="Season 02",
-    )
+    return Show(search_title="신인감독 김연경", folder_name="The Rookie Coach")
+
+
+def make_season(show: Show, number: int = 2) -> Season:
+    return Season(show=show, number=number, release_season=number, folder=f"Season {number:02}")
 
 
 def test_init_db_seeds_source_and_settings():
@@ -44,15 +52,45 @@ def test_show_defaults():
         s.commit()
         assert show.status == "following"
         assert show.added_at is not None
+        assert show.max_known_season == 0
+        assert show.poster_url is None and show.tvdb_id is None
+
+
+def test_season_and_episode_defaults_and_relationships():
+    Session = init_db("sqlite://")
+    with Session() as s:
+        show = make_show()
+        s2 = make_season(show, 2)
+        s1 = make_season(show, 1)
+        ep = Episode(season=s2, number=3)
+        s.add(show)
+        s.commit()
+        s.expire_all()
+        assert show.seasons == [s1, s2]  # ordered by number when loaded
+        assert s2.show is show and ep.season is s2 and s2.episodes == [ep]
+        assert ep.season_id == s2.id
+        assert (s2.followed, s2.followed_since, s2.first_aired) == (False, None, None)
+        assert (ep.state, ep.monitored, ep.overdue_notified) == ("wanted", False, False)
+
+
+def test_duplicate_season_number_rejected():
+    Session = init_db("sqlite://")
+    with Session() as s:
+        show = make_show()
+        make_season(show, 1)
+        make_season(show, 1)
+        s.add(show)
+        with pytest.raises(IntegrityError):
+            s.commit()
 
 
 def test_duplicate_episode_number_rejected():
     Session = init_db("sqlite://")
     with Session() as s:
-        show = make_show()
-        s.add(show)
+        season = make_season(make_show())
+        s.add(season)
         s.commit()
-        s.add_all([Episode(show_id=show.id, number=1), Episode(show_id=show.id, number=1)])
+        s.add_all([Episode(season_id=season.id, number=1), Episode(season_id=season.id, number=1)])
         with pytest.raises(IntegrityError):
             s.commit()
 
@@ -69,9 +107,7 @@ def test_timestamps_are_naive_utc():
     Session = init_db("sqlite://")
     with Session() as s:
         show = make_show()
-        s.add(show)
-        s.commit()
-        ep = Episode(show_id=show.id, number=1)
+        ep = Episode(season=make_season(show), number=1)
         s.add(ep)
         s.commit()
         grab = Grab(episode_id=ep.id, post_url="u", release_name="r", qbit_tag="t")
@@ -85,10 +121,7 @@ def test_timestamps_are_naive_utc():
 def test_grab_ids_are_never_reused():
     Session = init_db("sqlite://")
     with Session() as s:
-        show = make_show()
-        s.add(show)
-        s.flush()
-        ep = Episode(show_id=show.id, number=1)
+        ep = Episode(season=make_season(make_show()), number=1)
         s.add(ep)
         s.flush()
         first = Grab(episode_id=ep.id, post_url="u", release_name="r", qbit_tag="")
@@ -103,32 +136,30 @@ def test_grab_ids_are_never_reused():
         assert second.id > first_id
 
 
-_OLD_SHOWS_DDL = """
+_V2_SHOWS_WITHOUT_POSTER = """
 CREATE TABLE shows (
     id INTEGER NOT NULL PRIMARY KEY,
     search_title VARCHAR NOT NULL,
-    release_season INTEGER NOT NULL,
     tvdb_id INTEGER,
-    tvdb_season INTEGER NOT NULL,
     folder_name VARCHAR NOT NULL,
-    season_folder VARCHAR NOT NULL,
     status VARCHAR NOT NULL,
-    season_first_aired DATE,
-    added_at DATETIME NOT NULL
+    added_at DATETIME NOT NULL,
+    max_known_season INTEGER NOT NULL
 )
 """
 
 
-def test_init_db_adds_missing_nullable_columns_to_old_db(tmp_path):
+def test_init_db_adds_missing_nullable_columns_to_existing_db(tmp_path):
     import sqlite3
 
     path = tmp_path / "old.db"
     con = sqlite3.connect(path)
-    con.execute(_OLD_SHOWS_DDL)
+    con.execute(_V2_SHOWS_WITHOUT_POSTER)
     con.execute(
-        "INSERT INTO shows VALUES (1, '놀면 뭐하니', 1, 5, 1, 'Hangout', 'Season 01',"
-        " 'following', NULL, '2026-10-01 10:00:00')"
+        "INSERT INTO shows VALUES (1, '놀면 뭐하니', 5, 'Hangout', 'following',"
+        " '2026-10-01 10:00:00', 1)"
     )
+    con.execute("PRAGMA user_version = 2")
     con.commit()
     con.close()
 
@@ -146,3 +177,18 @@ def test_init_db_adds_missing_nullable_columns_to_old_db(tmp_path):
     cols = [row[1] for row in con.execute("PRAGMA table_info(shows)")]
     con.close()
     assert cols.count("poster_url") == 1
+
+
+def test_today_kst_is_the_date_in_seoul(monkeypatch):
+    from datetime import date, datetime, timezone
+
+    from kshow import clock
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            # 16:30 UTC on 1 Nov is 01:30 on 2 Nov in Seoul.
+            return datetime(2026, 11, 1, 16, 30, tzinfo=timezone.utc).astimezone(tz)
+
+    monkeypatch.setattr(clock, "datetime", FakeDatetime)
+    assert clock.today_kst() == date(2026, 11, 2)

@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 from sqlalchemy import ForeignKey, UniqueConstraint, create_engine, inspect, select, text
 from sqlalchemy.engine import Engine
@@ -7,6 +8,7 @@ from sqlalchemy.orm import (
     Mapped,
     Session,
     mapped_column,
+    relationship,
     sessionmaker,
 )
 from sqlalchemy.pool import StaticPool
@@ -26,28 +28,54 @@ class Show(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     search_title: Mapped[str]
-    release_season: Mapped[int]
     tvdb_id: Mapped[int | None]
-    tvdb_season: Mapped[int]
     folder_name: Mapped[str]
-    season_folder: Mapped[str]
     status: Mapped[str] = mapped_column(default="following")  # following | finished | stopped
-    season_first_aired: Mapped[date | None]
     poster_url: Mapped[str | None]  # https:// TVDB artwork, or None for a placeholder
     added_at: Mapped[datetime] = mapped_column(default=utcnow)
+    # Highest season number known when the show was added (or migrated, or last synced). A
+    # TVDB season above it is "new" and gets followed automatically; lower ones never are.
+    max_known_season: Mapped[int] = mapped_column(default=0)
+
+    seasons: Mapped[list["Season"]] = relationship(
+        back_populates="show", order_by="Season.number"
+    )
 
 
-class Episode(Base):
-    __tablename__ = "episodes"
+class Season(Base):
+    __tablename__ = "seasons"
     __table_args__ = (UniqueConstraint("show_id", "number"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     show_id: Mapped[int] = mapped_column(ForeignKey("shows.id"))
+    number: Mapped[int]  # TVDB season number
+    release_season: Mapped[int]  # season number as it appears in release names
+    folder: Mapped[str]  # season folder under the show folder, e.g. "Season 2" / "Season 01"
+    followed: Mapped[bool] = mapped_column(default=False)
+    followed_since: Mapped[date | None]  # Korean date; episodes airing from then are monitored
+    first_aired: Mapped[date | None]
+
+    show: Mapped[Show] = relationship(back_populates="seasons")
+    episodes: Mapped[list["Episode"]] = relationship(
+        back_populates="season", order_by="Episode.number"
+    )
+
+
+class Episode(Base):
+    __tablename__ = "episodes"
+    __table_args__ = (UniqueConstraint("season_id", "number"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    season_id: Mapped[int] = mapped_column(ForeignKey("seasons.id"))
     number: Mapped[int]
     tvdb_airdate: Mapped[date | None]
     state: Mapped[str] = mapped_column(default="wanted")  # wanted | downloading | downloaded | failed
     filed_path: Mapped[str | None]
     overdue_notified: Mapped[bool] = mapped_column(default=False)
+    # Fetched automatically when wanted. Manual searches never set this.
+    monitored: Mapped[bool] = mapped_column(default=False)
+
+    season: Mapped[Season] = relationship(back_populates="episodes")
 
 
 class Grab(Base):
@@ -141,10 +169,14 @@ def add_missing_columns(engine: Engine) -> None:
 
 
 def init_db(url: str) -> sessionmaker:
+    from kshow.migrations import migrate  # imports this module's models
+
     kwargs = {}
     if url in ("sqlite://", "sqlite:///:memory:"):
         kwargs = {"poolclass": StaticPool, "connect_args": {"check_same_thread": False}}
     engine = create_engine(url, **kwargs)
+    db_file = engine.url.database
+    migrate(engine, Path(db_file) if db_file and db_file != ":memory:" else None)
     Base.metadata.create_all(engine)
     add_missing_columns(engine)
     factory = sessionmaker(engine, expire_on_commit=False)
