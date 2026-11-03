@@ -3,7 +3,7 @@
 {% block content %}
 {% if logged_out %}
 <div class="auth-box">
-  <p class="logo logo-big">k<b>show</b></p>
+  <p class="logo logo-big"><img class="logo-mark" src="{{ static_url('icons/icon.svg') }}" alt="" width="28" height="28">k<b>show</b></p>
   <div class="card notice">
     <h1>{{ title }}</h1>
     <p class="muted">{{ message }}</p>

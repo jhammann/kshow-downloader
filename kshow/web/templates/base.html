@@ -6,13 +6,18 @@
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0f1115">
   <title>{% block title %}kshow{% endblock %} · kshow</title>
+  <link rel="icon" href="{{ static_url('icons/favicon.ico') }}" sizes="48x48">
+  <link rel="icon" href="{{ static_url('icons/favicon.svg') }}" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="{{ static_url('icons/apple-touch-icon.png') }}">
+  <link rel="manifest" href="{{ static_url('manifest.webmanifest') }}">
+  <meta name="apple-mobile-web-app-title" content="kshow">
   <link rel="stylesheet" href="{{ static_url('app.css') }}">
   <script src="{{ static_url('htmx.min.js') }}" defer></script>
 </head>
 <body class="{% block body_class %}{% endblock %}">
   {% block header %}
   <header class="top">
-    <a class="logo" href="/" aria-label="kshow, all shows">k<b>show</b></a>
+    <a class="logo" href="/" aria-label="kshow, all shows"><img class="logo-mark" src="{{ static_url('icons/icon.svg') }}" alt="" width="28" height="28">k<b>show</b></a>
     <nav>
       <a class="pill-button" href="/add"><span>+ Add</span></a>
       <a class="nav-link" href="/settings">Settings</a>

@@ -247,6 +247,19 @@ def test_show_list_orders_and_banners(client):
     assert client.get("/static/app.css").status_code == 200
 
 
+def test_pages_link_the_app_icons_and_manifest(client):
+    body = client.get("/").text
+    icons = ("icons/favicon.ico", "icons/favicon.svg", "icons/apple-touch-icon.png")
+    for name in (*icons, "manifest.webmanifest"):
+        assert f"/static/{name}?v=" in body
+    assert 'class="logo-mark" src="/static/icons/icon.svg?v=' in body
+    manifest = client.get("/static/manifest.webmanifest").json()
+    assert manifest["name"] == "kshow" and manifest["start_url"] == "/"
+    for icon in manifest["icons"]:
+        assert client.get(f"/static/{icon['src']}").status_code == 200
+    assert any(icon["purpose"] == "maskable" for icon in manifest["icons"])
+
+
 def test_placeholder_poster_is_deterministic():
     a = placeholder_poster(3, "The Wonder Coach")
     assert a == placeholder_poster(3, "The Wonder Coach")
