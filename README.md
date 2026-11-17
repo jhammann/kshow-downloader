@@ -195,7 +195,8 @@ kshow notifies when:
 - a search can't run because no source is reachable ("Search failed");
 - TVDB announces a new season and kshow starts following it ("New season");
 - qBittorrent can't be reached or logged in to (once per outage), and when it works again;
-- a source becomes unreachable, and when it is reachable again;
+- a source becomes unreachable, and when it is reachable again (can be turned off in
+  Settings);
 - a show is deleted ("Show deleted").
 
 ## Leaving `OIDC_ISSUER` unset

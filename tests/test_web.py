@@ -1185,6 +1185,7 @@ def _settings_form(**kw):
         "qbit_category": "kshow",
         "qbit_save_path": "/downloads/kshow",
         "path_map": "",
+        "notify_source_status": "1",
     }
     data.update(kw)
     return data
@@ -1249,6 +1250,16 @@ def test_settings_saves_all_keys(client):
     with _session(client) as s:
         for key, value in form.items():
             assert get_setting(s, key) == value
+
+
+def test_settings_toggles_source_notifications(client):
+    assert 'name="notify_source_status" type="checkbox" value="1" checked' in client.get("/settings").text
+    form = _settings_form()
+    del form["notify_source_status"]  # an unchecked box is not submitted
+    assert client.post("/settings", data=form).status_code == 303
+    with _session(client) as s:
+        assert get_setting(s, "notify_source_status") == "0"
+    assert 'value="1" checked' not in client.get("/settings").text
 
 
 def test_sources_add_and_edit(client):

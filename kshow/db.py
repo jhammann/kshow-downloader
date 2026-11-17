@@ -128,6 +128,7 @@ DEFAULT_SETTINGS = {
     "preferred_resolution": "720p",
     "stall_hours": "6",
     "path_map": "",
+    "notify_source_status": "1",  # "1": notify when a source goes unreachable and comes back
     "qbit_outage_since": "",  # naive-UTC ISO time qBittorrent started failing, "" when fine
 }
 

@@ -968,6 +968,7 @@ SETTING_KEYS = (
     "qbit_category",
     "qbit_save_path",
     "path_map",
+    "notify_source_status",
 )
 
 
@@ -1010,6 +1011,7 @@ def _validate_settings(form: dict[str, str]) -> tuple[dict[str, str], list[str]]
         clean["path_map"] = path_map
     else:
         errors.append("Path map must be empty or look like /from=/to.")
+    clean["notify_source_status"] = "1" if form["notify_source_status"] else "0"
     return clean, errors
 
 

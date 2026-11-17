@@ -251,18 +251,20 @@ async def search_candidates(
                 if row is not None and row.unreachable_since is None:
                     row.unreachable_since = utcnow()
                     session.commit()
-                    await deps.notifier.send(
-                        "Source unreachable", f"{source.name} is unreachable"
-                    )
+                    if get_setting(session, "notify_source_status") == "1":
+                        await deps.notifier.send(
+                            "Source unreachable", f"{source.name} is unreachable"
+                        )
                 break
             if page == 1:
                 answered = True
                 if row is not None and row.unreachable_since is not None:
                     row.unreachable_since = None
                     session.commit()
-                    await deps.notifier.send(
-                        "Source back", f"{source.name} is reachable again."
-                    )
+                    if get_setting(session, "notify_source_status") == "1":
+                        await deps.notifier.send(
+                            "Source back", f"{source.name} is reachable again."
+                        )
             new = [c for c in found if c.post_url not in candidates]
             for c in new:
                 candidates[c.post_url] = c

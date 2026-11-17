@@ -1567,3 +1567,34 @@ async def test_seasons_unknown_at_add_flag_kept_while_tvdb_fails(db, http, tmp_p
 
     with db() as s:
         assert s.get(Show, show_id).seasons_unknown_at_add is True
+
+
+@respx.mock
+async def test_source_unreachable_notification_can_be_turned_off(db, http, tmp_path):
+    respx.route(host__regex=r"torrenttip\d+\.top").mock(side_effect=httpx.ConnectError("dead"))
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db)
+    with db() as s:
+        set_setting(s, "notify_source_status", "0")
+
+    await check_show(make_deps(db, http, tmp_path), show_id)
+
+    assert apprise.call_count == 0
+    with db() as s:
+        assert s.scalars(select(SourceRow)).one().unreachable_since is not None
+
+
+@respx.mock
+async def test_source_back_notification_can_be_turned_off(db, http, tmp_path):
+    mock_search()
+    apprise = respx.post(APPRISE).respond(200)
+    show_id = add_show(db)
+    with db() as s:
+        s.scalars(select(SourceRow)).one().unreachable_since = utcnow()
+        set_setting(s, "notify_source_status", "0")
+
+    await check_show(make_deps(db, http, tmp_path), show_id)
+
+    assert apprise.call_count == 0
+    with db() as s:
+        assert s.scalars(select(SourceRow)).one().unreachable_since is None
