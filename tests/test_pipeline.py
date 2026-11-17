@@ -353,7 +353,8 @@ async def test_qbit_down_keeps_episode_wanted(db, http, tmp_path):
     add = respx.post(f"{QBIT}/api/v2/torrents/add").respond(200, text="Ok.")
     apprise = respx.post(APPRISE).respond(200)
     show_id = add_show(db)
-    add_episode(db, show_id, 4, tvdb_airdate=utcnow().date() - timedelta(days=5))
+    # aired on the release's date (261101), so the airdate check accepts it; long overdue
+    add_episode(db, show_id, 4, tvdb_airdate=date(2026, 11, 1))
 
     await check_show(make_deps(db, http, tmp_path), show_id)  # must not raise
 
